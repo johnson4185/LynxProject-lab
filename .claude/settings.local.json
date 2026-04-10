@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc:*)",
+      "Bash(find /c/sniplyv2/utils/Lynx.Api -type f -not -name \"*.cs\" -delete)",
+      "Bash(find /c/sniplyv2/utils/Lynx.Api -type f -name \"*.cs\" -delete)",
+      "Bash(ls /c/sniplyv2/*.*)",
+      "Bash(ls /c/sniplyv2/*.mjs)",
+      "Bash(find /c/sniplyv2/src -type f -delete)",
+      "Bash(find /c/sniplyv2/src -type d -empty -delete)",
+      "Bash(npm install:*)",
+      "Bash(npm run:*)",
+      "Bash(node -e \"require\\('./node_modules/next/dist/bin/next'\\)\" -- dev)",
+      "Bash(npx next:*)",
+      "Bash(taskkill /PID 15552 /F)",
+      "Bash(taskkill /FI \"WINDOWTITLE eq next*\" /F)",
+      "Read(//c/Users/johns/AppData/Local/Temp/claude/c--sniplyv2/36b5bc4d-efae-4b75-b9ad-70de21b7aefa/tasks/**)",
+      "Bash(curl -s http://localhost:3000)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000)",
+      "Bash(netstat -ano)",
+      "Bash(tasklist /FI \"PID eq 15552\")",
+      "Bash(wmic process:*)",
+      "Bash(cmd.exe /c \"taskkill /F /PID 15552\")",
+      "Bash(cmd.exe /c \"taskkill /F /PID 15552 2>&1 && echo KILLED || echo NOT_FOUND\")",
+      "Bash(cp -r /c/sniplyv2/frontend/src/app/dashboard /c/sniplyv2/platform/src/app/)",
+      "Bash(cp -r /c/sniplyv2/frontend/src/app/auth /c/sniplyv2/platform/src/app/)",
+      "Bash(cp -r /c/sniplyv2/frontend/src/app/api /c/sniplyv2/platform/src/app/)",
+      "Bash(cp -r /c/sniplyv2/frontend/src/platform /c/sniplyv2/platform/src/)",
+      "Bash(cp -r /c/sniplyv2/frontend/public/fonts /c/sniplyv2/platform/public/)",
+      "Bash(cp -r /c/sniplyv2/frontend/src/app/page.tsx /c/sniplyv2/website/)",
+      "Bash(cp -r /c/sniplyv2/frontend/src/components /c/sniplyv2/website/src/)",
+      "Bash(rm -f /c/sniplyv2/platform/.env.local)",
+      "Bash(rm -f /c/sniplyv2/platform/src/platform/lib/api.ts)"
+    ]
+  }
+}

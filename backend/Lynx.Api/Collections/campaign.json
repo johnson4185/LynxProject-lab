@@ -1,0 +1,134 @@
+{
+  "info": {
+    "name": "Lynx Admin Campaign API",
+    "_postman_id": "lynx-admin-campaigns",
+    "description": "Enterprise SaaS Admin Campaign APIs - Multi Tenant",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:5055" },
+    { "key": "tenantId", "value": "tenant_abc" },
+    { "key": "campaignId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Create Campaign",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Tenant-Id", "value": "{{tenantId}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"Ramadan Promo 2026\",\n  \"description\": \"Seasonal marketing campaign\",\n  \"status\": \"Active\",\n  \"startDate\": \"2026-03-01\",\n  \"endDate\": \"2026-03-31\",\n  \"dailyClickLimit\": 100,\n  \"totalClickLimit\": 1000,\n  \"budgetAmount\": 5000,\n  \"currency\": \"SAR\",\n  \"utmSource\": \"facebook\",\n  \"utmMedium\": \"paid\",\n  \"utmCampaign\": \"ramadan_2026\"\n}"
+        },
+        "url": "{{baseUrl}}/api/admin/campaigns"
+      }
+    },
+    {
+      "name": "Search Campaigns",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "X-Tenant-Id", "value": "{{tenantId}}" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/admin/campaigns?status=Active&page=1&pageSize=10",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "admin", "campaigns"],
+          "query": [
+            { "key": "status", "value": "Active" },
+            { "key": "page", "value": "1" },
+            { "key": "pageSize", "value": "10" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get Campaign By Id",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "X-Tenant-Id", "value": "{{tenantId}}" }
+        ],
+        "url": "{{baseUrl}}/api/admin/campaigns/{{campaignId}}"
+      }
+    },
+    {
+      "name": "Update Campaign",
+      "request": {
+        "method": "PUT",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Tenant-Id", "value": "{{tenantId}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"Ramadan Mega Promo\",\n  \"status\": \"Paused\",\n  \"dailyClickLimit\": 50\n}"
+        },
+        "url": "{{baseUrl}}/api/admin/campaigns/{{campaignId}}"
+      }
+    },
+    {
+      "name": "Change Campaign Status",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Tenant-Id", "value": "{{tenantId}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"status\": \"Closed\",\n  \"reason\": \"Manual closure\"\n}"
+        },
+        "url": "{{baseUrl}}/api/admin/campaigns/{{campaignId}}/status"
+      }
+    },
+    {
+      "name": "Archive Campaign",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "X-Tenant-Id", "value": "{{tenantId}}" }
+        ],
+        "url": "{{baseUrl}}/api/admin/campaigns/{{campaignId}}/archive?actor=admin_user"
+      }
+    },
+    {
+      "name": "Restore Campaign",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "X-Tenant-Id", "value": "{{tenantId}}" }
+        ],
+        "url": "{{baseUrl}}/api/admin/campaigns/{{campaignId}}/restore?actor=admin_user"
+      }
+    },
+    {
+      "name": "Clone Campaign",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Tenant-Id", "value": "{{tenantId}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"newName\": \"Ramadan Promo Copy\",\n  \"startDate\": \"2026-04-01\",\n  \"endDate\": \"2026-04-30\"\n}"
+        },
+        "url": "{{baseUrl}}/api/admin/campaigns/{{campaignId}}/clone"
+      }
+    },
+    {
+      "name": "Campaign Analytics Summary",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "X-Tenant-Id", "value": "{{tenantId}}" }
+        ],
+        "url": "{{baseUrl}}/api/admin/campaigns/{{campaignId}}/analytics/summary?lastHours=24&topLinks=10"
+      }
+    }
+  ]
+}

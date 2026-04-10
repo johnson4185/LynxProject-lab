@@ -1,0 +1,31 @@
+dotnet ef dbcontext scaffold \
+"Host=10.8.0.1;Port=5432;Database=lynxdb;Username=lynxuser;Password=Lynx@#\!" \
+Npgsql.EntityFrameworkCore.PostgreSQL \
+--schema public \
+--output-dir Domain/Entities \
+--context-dir Infrastructure \
+--context AppDbContext \
+--use-database-names \
+--no-onconfiguring \
+--force
+
+dotnet ef dbcontext scaffold \
+'Host=10.8.0.1;Port=5432;Database=lynxdb;Username=lynxuser;Password=Lynx@#!' \
+Npgsql.EntityFrameworkCore.PostgreSQL \
+--schema public \
+--output-dir Domain/Entities \
+--context-dir Infrastructure \
+--context AppDbContext \
+--no-onconfiguring \
+--force
+
+
+dotnet ef dbcontext scaffold \
+'Host=10.8.0.1;Port=5432;Database=cmsdb;Username=cmsuser;Password=Cms1@#!' \
+Npgsql.EntityFrameworkCore.PostgreSQL \
+--schema public \
+--context ApplicationDbContext \
+-o Models \
+--context-dir Data \
+--no-onconfiguring \
+--force
