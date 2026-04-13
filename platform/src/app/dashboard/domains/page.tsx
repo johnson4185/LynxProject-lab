@@ -1,11 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Plus, X, Globe, CheckCircle, Clock, AlertCircle, Copy, Check, ExternalLink, Trash2 } from "lucide-react";
 import PageHeader from "@/platform/components/PageHeader";
 import Panel from "@/platform/components/Panel";
 import StatCard from "@/platform/components/StatCard";
-import { dashboardData } from "@/platform/lib/dashboardData";
+import { api } from "@/platform/lib/api";
 
 const STATUS_STYLES: Record<string, { bg: string; color: string; icon: React.ReactNode }> = {
   Verified: { bg: "#F0FDF4", color: "#166534", icon: <CheckCircle size={12} /> },
@@ -18,16 +18,100 @@ const DNS_RECORDS = [
   { type: "TXT", host: "@", value: "urlify-verify=abc123def456", ttl: "3600" },
 ];
 
+interface DomainDto {
+  id: string;
+  domainName: string;
+  isVerified: boolean;
+  verificationStatus?: string;
+  sslStatus?: string;
+  createdAtUtc?: string;
+}
+
+interface DomainRecord {
+  id: string;
+  host: string;
+  status: "Verified" | "Pending" | "Failed";
+  ssl: string;
+}
+
+function mapDto(d: DomainDto): DomainRecord {
+  const status: DomainRecord["status"] = d.isVerified
+    ? "Verified"
+    : (d.verificationStatus === "Failed" ? "Failed" : "Pending");
+  const ssl = d.isVerified ? "Active" : "Pending";
+  return { id: d.id, host: d.domainName, status, ssl };
+}
+
 export default function DomainsPage() {
+  const [domains, setDomains] = useState<DomainRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [apiError, setApiError] = useState<string | null>(null);
+
   const [showAdd, setShowAdd] = useState(false);
+  const [domainInput, setDomainInput] = useState("");
+  const [adding, setAdding] = useState(false);
+
   const [showDns, setShowDns] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    api
+      .get<{ total: number; page: number; pageSize: number; items: DomainDto[] }>(
+        "/api/v1/tenant/domains?pageSize=100"
+      )
+      .then((res) => {
+        if (!cancelled) setDomains(res.items.map(mapDto));
+      })
+      .catch((err: Error) => {
+        if (!cancelled) setApiError(err.message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   const handleCopy = (val: string) => {
     navigator.clipboard.writeText(val).catch(() => {});
     setCopied(val);
     setTimeout(() => setCopied(null), 1500);
   };
+
+  const handleAddDomain = () => {
+    const host = domainInput.trim();
+    if (!host) return;
+    setAdding(true);
+    api
+      .post<DomainDto>("/api/v1/tenant/domains", { domainName: host })
+      .then((res) => {
+        setDomains((prev) => [...prev, mapDto(res)]);
+        setDomainInput("");
+        setShowAdd(false);
+      })
+      .catch((err: Error) => alert(`Failed to add domain: ${err.message}`))
+      .finally(() => setAdding(false));
+  };
+
+  const handleDelete = (id: string) => {
+    setDomains((prev) => prev.filter((d) => d.id !== id));
+    api.delete(`/api/v1/tenant/domains/${id}`).catch(console.error);
+  };
+
+  const handleVerify = (id: string) => {
+    api
+      .post(`/api/v1/tenant/domains/${id}/verify`, {})
+      .then(() => {
+        setDomains((prev) =>
+          prev.map((d) => (d.id === id ? { ...d, status: "Verified", ssl: "Active" } : d))
+        );
+      })
+      .catch(console.error);
+    setShowDns(null);
+  };
+
+  const verified = domains.filter((d) => d.status === "Verified").length;
 
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto" }}>
@@ -64,9 +148,9 @@ export default function DomainsPage() {
       {/* Stats */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginBottom: 20 }}>
         {[
-          { label: "Total domains", value: dashboardData.domains.length },
-          { label: "Verified", value: dashboardData.domains.filter((d) => d.status === "Verified").length },
-          { label: "Total link clicks", value: dashboardData.domains.reduce((s, d) => s + d.clicks, 0).toLocaleString() },
+          { label: "Total domains", value: domains.length },
+          { label: "Verified", value: verified },
+          { label: "Pending verification", value: domains.filter((d) => d.status === "Pending").length },
         ].map((s) => (
           <StatCard key={s.label} micro label={s.label} value={s.value} />
         ))}
@@ -77,12 +161,12 @@ export default function DomainsPage() {
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
           <thead>
             <tr style={{ background: "var(--sky-100)", borderBottom: "1px solid var(--border)" }}>
-              {["Domain", "Status", "SSL", "Links", "Clicks", "Actions"].map((h) => (
+              {["Domain", "Status", "SSL", "Actions"].map((h) => (
                 <th
                   key={h}
                   style={{
                     padding: "10px 20px",
-                    textAlign: h === "Clicks" || h === "Links" ? "right" : "left",
+                    textAlign: "left",
                     fontWeight: 700,
                     fontSize: 10,
                     color: "var(--text-muted)",
@@ -97,140 +181,156 @@ export default function DomainsPage() {
             </tr>
           </thead>
           <tbody>
-            {dashboardData.domains.map((domain) => {
-              const statusStyle = STATUS_STYLES[domain.status] ?? STATUS_STYLES.Pending;
-              return (
-                <tr
-                  key={domain.host}
-                  style={{ borderBottom: "1px solid var(--border)" }}
-                  onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "var(--sky-50)")}
-                  onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "transparent")}
-                >
-                  <td style={{ padding: "14px 20px" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                      <div
-                        style={{
-                          width: 28,
-                          height: 28,
-                          background: "var(--ocean-50)",
-                          border: "1px solid var(--ocean-100)",
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          flexShrink: 0,
-                        }}
-                      >
-                        <Globe size={13} style={{ color: "var(--ocean-500)" }} />
-                      </div>
-                      <div>
-                        <div style={{ fontWeight: 700, color: "var(--ink)", fontFamily: "var(--font-mono)", fontSize: 13 }}>
-                          {domain.host}
-                        </div>
-                        <div style={{ fontSize: 11, color: "var(--text-muted)" }}>https://{domain.host}</div>
-                      </div>
-                    </div>
-                  </td>
-                  <td style={{ padding: "14px 20px" }}>
-                    <span
-                      style={{
-                        display: "inline-flex",
-                        alignItems: "center",
-                        gap: 5,
-                        background: statusStyle.bg,
-                        color: statusStyle.color,
-                        fontSize: 11,
-                        fontWeight: 700,
-                        padding: "3px 9px",
-                        border: `1px solid ${statusStyle.color}33`,
-                      }}
-                    >
-                      {statusStyle.icon}
-                      {domain.status}
-                    </span>
-                  </td>
-                  <td style={{ padding: "14px 20px" }}>
-                    <span
-                      style={{
-                        display: "inline-flex",
-                        alignItems: "center",
-                        gap: 5,
-                        background: domain.ssl === "Active" ? "#F0FDF4" : "#FFFBEB",
-                        color: domain.ssl === "Active" ? "#166534" : "#92400E",
-                        fontSize: 11,
-                        fontWeight: 700,
-                        padding: "3px 9px",
-                        border: `1px solid ${domain.ssl === "Active" ? "#BBF7D0" : "#FCD34D"}`,
-                      }}
-                    >
-                      {domain.ssl}
-                    </span>
-                  </td>
-                  <td style={{ padding: "14px 20px", textAlign: "right", fontWeight: 700, color: "var(--ink)" }}>
-                    {domain.links}
-                  </td>
-                  <td style={{ padding: "14px 20px", textAlign: "right", fontWeight: 700, color: "var(--ink)" }}>
-                    {domain.clicks.toLocaleString()}
-                  </td>
-                  <td style={{ padding: "14px 20px" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                      {domain.status === "Pending" && (
-                        <button
-                          onClick={() => setShowDns(domain.host)}
+            {loading ? (
+              <tr>
+                <td colSpan={4} style={{ padding: "56px 20px", textAlign: "center", color: "var(--text-muted)" }}>
+                  Loading domains…
+                </td>
+              </tr>
+            ) : apiError ? (
+              <tr>
+                <td colSpan={4} style={{ padding: "56px 20px", textAlign: "center", color: "#B91C1C" }}>
+                  {apiError}
+                </td>
+              </tr>
+            ) : domains.length === 0 ? (
+              <tr>
+                <td colSpan={4} style={{ padding: "56px 20px", textAlign: "center", color: "var(--text-muted)" }}>
+                  No custom domains yet. Click "Add domain" to get started.
+                </td>
+              </tr>
+            ) : (
+              domains.map((domain) => {
+                const statusStyle = STATUS_STYLES[domain.status] ?? STATUS_STYLES.Pending;
+                return (
+                  <tr
+                    key={domain.id}
+                    style={{ borderBottom: "1px solid var(--border)" }}
+                    onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "var(--sky-50)")}
+                    onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "transparent")}
+                  >
+                    <td style={{ padding: "14px 20px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <div
                           style={{
+                            width: 28,
+                            height: 28,
+                            background: "var(--ocean-50)",
+                            border: "1px solid var(--ocean-100)",
                             display: "flex",
                             alignItems: "center",
-                            gap: 4,
-                            height: 28,
-                            padding: "0 10px",
-                            fontSize: 10,
-                            fontWeight: 700,
-                            background: "#FFFBEB",
-                            border: "1px solid #FCD34D",
-                            color: "#92400E",
-                            cursor: "pointer",
-                            fontFamily: "var(--font-body)",
+                            justifyContent: "center",
+                            flexShrink: 0,
                           }}
                         >
-                          View DNS
+                          <Globe size={13} style={{ color: "var(--ocean-500)" }} />
+                        </div>
+                        <div>
+                          <div style={{ fontWeight: 700, color: "var(--ink)", fontFamily: "var(--font-mono)", fontSize: 13 }}>
+                            {domain.host}
+                          </div>
+                          <div style={{ fontSize: 11, color: "var(--text-muted)" }}>https://{domain.host}</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td style={{ padding: "14px 20px" }}>
+                      <span
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 5,
+                          background: statusStyle.bg,
+                          color: statusStyle.color,
+                          fontSize: 11,
+                          fontWeight: 700,
+                          padding: "3px 9px",
+                          border: `1px solid ${statusStyle.color}33`,
+                        }}
+                      >
+                        {statusStyle.icon}
+                        {domain.status}
+                      </span>
+                    </td>
+                    <td style={{ padding: "14px 20px" }}>
+                      <span
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 5,
+                          background: domain.ssl === "Active" ? "#F0FDF4" : "#FFFBEB",
+                          color: domain.ssl === "Active" ? "#166534" : "#92400E",
+                          fontSize: 11,
+                          fontWeight: 700,
+                          padding: "3px 9px",
+                          border: `1px solid ${domain.ssl === "Active" ? "#BBF7D0" : "#FCD34D"}`,
+                        }}
+                      >
+                        {domain.ssl}
+                      </span>
+                    </td>
+                    <td style={{ padding: "14px 20px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        {domain.status === "Pending" && (
+                          <button
+                            onClick={() => setShowDns(domain.id)}
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 4,
+                              height: 28,
+                              padding: "0 10px",
+                              fontSize: 10,
+                              fontWeight: 700,
+                              background: "#FFFBEB",
+                              border: "1px solid #FCD34D",
+                              color: "#92400E",
+                              cursor: "pointer",
+                              fontFamily: "var(--font-body)",
+                            }}
+                          >
+                            View DNS
+                          </button>
+                        )}
+                        <button
+                          onClick={() => window.open(`https://${domain.host}`, "_blank")}
+                          style={{
+                            background: "none",
+                            border: "1px solid var(--border)",
+                            color: "var(--text-muted)",
+                            width: 28,
+                            height: 28,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            cursor: "pointer",
+                          }}
+                          title="Open"
+                        >
+                          <ExternalLink size={11} />
                         </button>
-                      )}
-                      <button
-                        style={{
-                          background: "none",
-                          border: "1px solid var(--border)",
-                          color: "var(--text-muted)",
-                          width: 28,
-                          height: 28,
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          cursor: "pointer",
-                        }}
-                        title="Open"
-                      >
-                        <ExternalLink size={11} />
-                      </button>
-                      <button
-                        style={{
-                          background: "none",
-                          border: "1px solid var(--border)",
-                          color: "var(--coral)",
-                          width: 28,
-                          height: 28,
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          cursor: "pointer",
-                        }}
-                        title="Delete"
-                      >
-                        <Trash2 size={11} />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
+                        <button
+                          onClick={() => handleDelete(domain.id)}
+                          style={{
+                            background: "none",
+                            border: "1px solid var(--border)",
+                            color: "var(--coral)",
+                            width: 28,
+                            height: 28,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            cursor: "pointer",
+                          }}
+                          title="Delete"
+                        >
+                          <Trash2 size={11} />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
           </tbody>
         </table>
       </Panel>
@@ -254,7 +354,7 @@ export default function DomainsPage() {
           >
             <div style={{ padding: "20px 24px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               <div>
-                <h2 style={{ fontSize: 16, fontWeight: 800, color: "var(--ink)" }}>DNS setup — {showDns}</h2>
+                <h2 style={{ fontSize: 16, fontWeight: 800, color: "var(--ink)" }}>DNS setup — {domains.find((d) => d.id === showDns)?.host}</h2>
                 <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>Add these records to your DNS provider, then click Verify.</p>
               </div>
               <button onClick={() => setShowDns(null)} style={{ background: "none", border: "1px solid var(--border)", width: 30, height: 30, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
@@ -298,7 +398,10 @@ export default function DomainsPage() {
                 </tbody>
               </table>
               <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
-                <button onClick={() => setShowDns(null)} style={{ flex: 1, height: 40, background: "var(--ocean-500)", color: "#fff", border: "none", fontFamily: "var(--font-body)", fontWeight: 700, fontSize: 12, letterSpacing: "0.06em", textTransform: "uppercase", cursor: "pointer" }}>
+                <button
+                  onClick={() => handleVerify(showDns)}
+                  style={{ flex: 1, height: 40, background: "var(--ocean-500)", color: "#fff", border: "none", fontFamily: "var(--font-body)", fontWeight: 700, fontSize: 12, letterSpacing: "0.06em", textTransform: "uppercase", cursor: "pointer" }}
+                >
                   Verify domain
                 </button>
                 <button onClick={() => setShowDns(null)} style={{ height: 40, padding: "0 18px", background: "transparent", border: "1px solid var(--border)", color: "var(--text-muted)", fontFamily: "var(--font-body)", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>
@@ -339,10 +442,13 @@ export default function DomainsPage() {
                   Domain name *
                 </label>
                 <input
+                  value={domainInput}
+                  onChange={(e) => setDomainInput(e.target.value)}
                   placeholder="links.yourcompany.com"
-                  style={{ width: "100%", height: 40, padding: "0 12px", border: "1px solid var(--border)", background: "var(--sky-100)", fontFamily: "var(--font-body)", fontSize: 13, color: "var(--ink)", outline: "none" }}
+                  style={{ width: "100%", height: 40, padding: "0 12px", border: "1px solid var(--border)", background: "var(--sky-100)", fontFamily: "var(--font-body)", fontSize: 13, color: "var(--ink)", outline: "none", boxSizing: "border-box" }}
                   onFocus={(e) => (e.currentTarget.style.borderColor = "var(--ocean-500)")}
                   onBlur={(e) => (e.currentTarget.style.borderColor = "var(--border)")}
+                  onKeyDown={(e) => { if (e.key === "Enter") handleAddDomain(); }}
                 />
                 <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 5 }}>Enter a subdomain you control, e.g. links.acme.com</p>
               </div>
@@ -353,8 +459,12 @@ export default function DomainsPage() {
                 </div>
               </div>
               <div style={{ display: "flex", gap: 10 }}>
-                <button onClick={() => setShowAdd(false)} style={{ flex: 1, height: 40, background: "var(--ocean-500)", color: "#fff", border: "none", fontFamily: "var(--font-body)", fontWeight: 700, fontSize: 12, letterSpacing: "0.06em", textTransform: "uppercase", cursor: "pointer" }}>
-                  Add domain
+                <button
+                  onClick={handleAddDomain}
+                  disabled={adding}
+                  style={{ flex: 1, height: 40, background: "var(--ocean-500)", color: "#fff", border: "none", fontFamily: "var(--font-body)", fontWeight: 700, fontSize: 12, letterSpacing: "0.06em", textTransform: "uppercase", cursor: adding ? "not-allowed" : "pointer", opacity: adding ? 0.7 : 1 }}
+                >
+                  {adding ? "Adding…" : "Add domain"}
                 </button>
                 <button onClick={() => setShowAdd(false)} style={{ height: 40, padding: "0 18px", background: "transparent", border: "1px solid var(--border)", color: "var(--text-muted)", fontFamily: "var(--font-body)", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>
                   Cancel

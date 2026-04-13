@@ -78,12 +78,13 @@ public class AdminLinksService : IAdminLinksService
 
         var total = await query.LongCountAsync(ct);
 
-        var rows = await query
+        var entities = await query
             .OrderByDescending(x => x.CreatedAtUtc)
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
-            .Select(x => MapToDto(x))
             .ToListAsync(ct);
+
+        var rows = entities.Select(MapToDto).ToList();
 
         return (total, page, pageSize, rows);
     }
@@ -98,13 +99,12 @@ public class AdminLinksService : IAdminLinksService
         if (string.IsNullOrWhiteSpace(shortCode))
             return null;
 
-        var row = await _db.Set<ShortLink>()
+        var entity = await _db.Set<ShortLink>()
             .AsNoTracking()
             .Where(x => x.TenantId == tenantId && x.ShortCode == shortCode)
-            .Select(x => MapToDto(x))
             .FirstOrDefaultAsync(ct);
 
-        return row;
+        return entity == null ? null : MapToDto(entity);
     }
 
     public async Task<LinkListItemDto?> UpdateAsync(
@@ -321,7 +321,7 @@ public class AdminLinksService : IAdminLinksService
         return "admin";
     }
 
-    private static LinkListItemDto MapToDto(ShortLink x)
+    private LinkListItemDto MapToDto(ShortLink x)
     {
         var now = DateTime.UtcNow;
 
@@ -330,10 +330,15 @@ public class AdminLinksService : IAdminLinksService
             : (x.ExpiryUtc < now) ? "expired"
             : "active";
 
+        string? finalUrl = null;
+        if (_hmac.TryParsePayload(x.SecureToken, out var payload))
+            finalUrl = payload.Url;
+
         return new LinkListItemDto
         {
             ShortCode = x.ShortCode!,
             Status = status,
+            FinalUrl = finalUrl,
             Title = x.Title,
             CampaignId = x.CampaignId,
             ClickCount = x.ClickCount,

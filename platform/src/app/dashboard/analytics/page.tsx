@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import {
   BarChart, Bar, PieChart, Pie, Cell, AreaChart, Area,
   XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend,
@@ -14,10 +14,27 @@ import {
 import PageHeader from "@/platform/components/PageHeader";
 import Panel from "@/platform/components/Panel";
 import Modal from "@/platform/components/Modal";
-import { dashboardData } from "@/platform/lib/dashboardData";
+import { api } from "@/platform/lib/api";
 import {
   TOOLTIP_STYLE, TICK_STYLE, LEGEND_STYLE, DEVICE_COLORS, GEO_COLORS,
 } from "@/platform/constants/chart";
+
+interface TimeSeriesPointDto {
+  timestamp: string;
+  count: number;
+}
+
+const STATIC_DEVICES = [
+  { name: "Desktop", value: 60 },
+  { name: "Mobile",  value: 32 },
+  { name: "Tablet",  value: 8  },
+];
+const STATIC_GEOS = [
+  { name: "US", value: 420 }, { name: "GB", value: 185 },
+  { name: "DE", value: 97  }, { name: "CA", value: 74  },
+  { name: "AU", value: 48  }, { name: "FR", value: 36  },
+  { name: "IN", value: 28  },
+];
 
 /* ─── Constants ─────────────────────────────────────────────────────────── */
 const RANGES = ["7d", "30d", "90d"] as const;
@@ -146,11 +163,58 @@ export default function AnalyticsPage() {
   const [showScheduleModal, setShowScheduleModal] = useState(false);
   const [utmSort, setUtmSort]               = useState<keyof typeof UTM_CAMPAIGNS[0]>("clicks");
 
-  const devices           = dashboardData.devices;
-  const totalDeviceClicks = devices.reduce((s, d) => s + d.value, 0);
-  const geos              = dashboardData.geos;
+  const [rawTimeseries, setRawTimeseries] = useState<Array<{ date: string; clicks: number }>>([]);
+  const [trafficSummary, setTrafficSummary] = useState<{ totalRequests: number; uniqueIps: number } | null>(null);
+  const [analyticsLinks, setAnalyticsLinks] = useState<Array<{ id: string; shortUrl: string; destination: string; slug: string; qrCodeUrl?: string; stats: { clicks: number; ctr: number; referrers: Record<string, number>; geo: Record<string, number> } }>>([]);
 
-  const timeline = useMemo(() => dashboardData.clicksTimeline.slice(-RANGE_DAYS[range]), [range]);
+  useEffect(() => {
+    const lastHours = RANGE_DAYS[range] * 24;
+    api
+      .get<TimeSeriesPointDto[]>(
+        `/api/v1/analytics/traffic/timeseries?lastHours=${lastHours}&interval=day`
+      )
+      .then((res) => {
+        const mapped = res.map((pt) => ({
+          date: (() => { const d = new Date(pt.timestamp); return isNaN(d.getTime()) ? String(pt.timestamp) : d.toISOString().slice(0, 10); })(),
+          clicks: pt.count,
+        }));
+        setRawTimeseries(mapped);
+      })
+      .catch(console.error);
+
+    api
+      .get<{ totalRequests: number; uniqueIps: number }>(`/api/v1/analytics/traffic/summary?lastHours=${lastHours}`)
+      .then((res) => setTrafficSummary(res))
+      .catch(console.error);
+  }, [range]);
+
+  // Load links once for the By Link tab
+  useEffect(() => {
+    api
+      .get<{ total: number; items: Array<{ shortCode: string; clickCount: number; status: string }> }>(
+        "/api/admin/v1/links?pageSize=200"
+      )
+      .then((res) => {
+        const mapped = res.items
+          .sort((a, b) => b.clickCount - a.clickCount)
+          .map((item) => ({
+            id: item.shortCode,
+            shortUrl: `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5055"}/r/${item.shortCode}`,
+            destination: "—",
+            slug: item.shortCode,
+            qrCodeUrl: undefined,
+            stats: { clicks: item.clickCount, ctr: 0, referrers: {}, geo: {} },
+          }));
+        setAnalyticsLinks(mapped);
+      })
+      .catch(console.error);
+  }, []);
+
+  const devices           = STATIC_DEVICES;
+  const totalDeviceClicks = devices.reduce((s, d) => s + d.value, 0);
+  const geos              = STATIC_GEOS;
+
+  const timeline = useMemo(() => rawTimeseries.slice(-RANGE_DAYS[range]), [rawTimeseries, range]);
 
   const areaData = useMemo(
     () => timeline.map((d, i) => ({ ...d, prev: Math.round(d.clicks * (0.65 + i * 0.04)) })),
@@ -260,9 +324,9 @@ export default function AnalyticsPage() {
       {/* KPI cards — always visible */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10, marginBottom: 20 }}>
         {[
-          { label: "Total Clicks",      value: dashboardData.totals.clicks.toLocaleString(), change: "+8.4%",  up: true,  icon: <MousePointerClick size={18} />, sub: "vs prev period" },
-          { label: "Unique Visitors",   value: "2,180",                                       change: "+5.2%",  up: true,  icon: <Users size={18} />,             sub: "vs prev period" },
-          { label: "Avg. CTR",          value: `${dashboardData.totals.avgCtr}%`,             change: "-2.1%",  up: false, icon: <TrendingUp size={18} />,        sub: "vs prev period" },
+          { label: "Total Clicks",      value: trafficSummary?.totalRequests?.toLocaleString() ?? "—", change: "+8.4%",  up: true,  icon: <MousePointerClick size={18} />, sub: "vs prev period" },
+          { label: "Unique Visitors",   value: trafficSummary?.uniqueIps?.toLocaleString() ?? "—",   change: "+5.2%",  up: true,  icon: <Users size={18} />,             sub: "vs prev period" },
+          { label: "Avg. CTR",          value: "—",                                                                 change: "-2.1%",  up: false, icon: <TrendingUp size={18} />,        sub: "vs prev period" },
           { label: "Engagement Score",  value: "72 / 100",                                    change: "+6pts",  up: true,  icon: <Zap size={18} />,               sub: "out of 100" },
           { label: "Avg. Session Time", value: "1m 58s",                                      change: "+14s",   up: true,  icon: <Clock size={18} />,             sub: "vs prev period" },
         ].map((k) => (
@@ -531,7 +595,7 @@ export default function AnalyticsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {[...dashboardData.links].sort((a, b) => b.stats.clicks - a.stats.clicks).map((link) => {
+                  {analyticsLinks.map((link) => {
                     const topRef = Object.entries(link.stats.referrers).sort((a, b) => b[1] - a[1])[0];
                     const topGeo = Object.entries(link.stats.geo).sort((a, b) => b[1] - a[1])[0];
                     return (
@@ -573,7 +637,7 @@ export default function AnalyticsPage() {
           <Panel title="Clicks Per Link" subtitle="Visual comparison" noPad>
             <div style={{ width: "100%", height: 260 }}>
               <ResponsiveContainer>
-                <BarChart data={dashboardData.links.map((l) => ({ name: l.slug, clicks: l.stats.clicks, ctr: l.stats.ctr }))} margin={{ top: 12, right: 24, bottom: 0, left: -10 }} barGap={4}>
+                <BarChart data={analyticsLinks.map((l) => ({ name: l.slug, clicks: l.stats.clicks, ctr: l.stats.ctr }))} margin={{ top: 12, right: 24, bottom: 0, left: -10 }} barGap={4}>
                   <CartesianGrid stroke="var(--sky-200)" strokeDasharray="3 3" vertical={false} />
                   <XAxis dataKey="name" tick={{ ...TICK_STYLE, fontFamily: "var(--font-mono)" }} axisLine={false} tickLine={false} />
                   <YAxis yAxisId="left"  tick={TICK_STYLE} axisLine={false} tickLine={false} />

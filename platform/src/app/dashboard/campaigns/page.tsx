@@ -10,6 +10,7 @@ import {
 import PageHeader from "@/platform/components/PageHeader";
 import Panel from "@/platform/components/Panel";
 import Modal from "@/platform/components/Modal";
+import { api } from "@/platform/lib/api";
 import Badge from "@/platform/components/Badge";
 import StatCard from "@/platform/components/StatCard";
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
@@ -146,6 +147,70 @@ const STATUS_BAR: Record<CampaignStatus, string> = {
 };
 const CURRENCIES = ["USD", "SAR", "EUR", "GBP", "AED"];
 
+/* ─── Backend DTO types ──────────────────────────────────────────────────── */
+interface CampaignDto {
+  id: string;
+  name: string;
+  description?: string | null;
+  status: string;
+  startDateUtc?: string | null;
+  endDateUtc?: string | null;
+  dailyClickLimit?: number | null;
+  totalClickLimit?: number | null;
+  budgetAmount?: number | null;
+  currency?: string | null;
+  utmSource?: string | null;
+  utmMedium?: string | null;
+  utmCampaign?: string | null;
+  totalClicks?: number | null;
+  linkCount?: number | null;
+  createdAtUtc: string;
+}
+
+interface CampaignCreateResponse {
+  id: string;
+  name: string;
+  status: string;
+  createdAtUtc: string;
+}
+
+interface CampaignAnalyticsSummary {
+  totalClicks?: number;
+  topLinks?: Record<string, number>;
+}
+
+function mapStatusFromBackend(s: string): CampaignStatus {
+  if (s === "Active") return "Active";
+  if (s === "Archived") return "Archived";
+  return "Paused"; // Draft, Paused, Closed → Paused
+}
+
+function mapStatusToBackend(s: CampaignStatus): string {
+  return s; // Active → Active, Paused → Paused, Archived → Archived
+}
+
+function mapCampaignDto(dto: CampaignDto): Campaign {
+  return {
+    id: dto.id,
+    name: dto.name,
+    description: dto.description ?? undefined,
+    status: mapStatusFromBackend(dto.status),
+    startDate: dto.startDateUtc?.slice(0, 10),
+    endDate: dto.endDateUtc?.slice(0, 10),
+    dailyClickLimit: dto.dailyClickLimit ?? undefined,
+    totalClickLimit: dto.totalClickLimit ?? undefined,
+    budgetAmount: dto.budgetAmount ?? undefined,
+    currency: dto.currency ?? "USD",
+    utmSource: dto.utmSource ?? undefined,
+    utmMedium: dto.utmMedium ?? undefined,
+    utmCampaign: dto.utmCampaign ?? undefined,
+    clicks: dto.totalClicks ?? 0,
+    links: dto.linkCount ?? 0,
+    ctr: 0,
+    createdAt: dto.createdAtUtc.slice(0, 10),
+  };
+}
+
 /* ─── Helpers ────────────────────────────────────────────────────────────── */
 const fmt = (n: number) => n.toLocaleString();
 const fmtDate = (d?: string) =>
@@ -164,13 +229,17 @@ type FormState = {
   budgetAmount: number | undefined; currency: string;
   utmSource: string; utmMedium: string; utmCampaign: string;
 };
-const blankForm = (): FormState => ({
-  name: "", description: "", status: "Active",
-  startDate: "", endDate: "",
-  dailyClickLimit: undefined, totalClickLimit: undefined,
-  budgetAmount: undefined, currency: "USD",
-  utmSource: "", utmMedium: "", utmCampaign: "",
-});
+const blankForm = (): FormState => {
+  const today = new Date().toISOString().slice(0, 10);
+  const in30 = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  return {
+    name: "", description: "", status: "Active",
+    startDate: today, endDate: in30,
+    dailyClickLimit: undefined, totalClickLimit: undefined,
+    budgetAmount: undefined, currency: "USD",
+    utmSource: "", utmMedium: "", utmCampaign: "",
+  };
+};
 const campaignToForm = (c: Campaign): FormState => ({
   name: c.name, description: c.description ?? "", status: c.status,
   startDate: c.startDate ?? "", endDate: c.endDate ?? "",
@@ -811,6 +880,7 @@ function CampaignDetail({
       {showCreateLinkModal && (
         <CampaignLinkCreateModal
           campaignName={campaign.name}
+          campaignId={campaign.id}
           onClose={() => setShowCreateLinkModal(false)}
           onCreate={(input) => {
             onAddLink(campaign.id, input);
@@ -838,261 +908,166 @@ function CampaignDetail({
 
 function CampaignLinkCreateModal({
   campaignName,
+  campaignId,
   onClose,
   onCreate,
 }: {
   campaignName: string;
+  campaignId: string;
   onClose: () => void;
   onCreate: (input: { shortUrl: string; destination: string; tags: string[] }) => void;
 }) {
+  const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5055";
+  const SHORT_DOMAIN = process.env.NEXT_PUBLIC_SHORT_DOMAIN ?? "url.ify";
+
   const [destination, setDestination] = useState("https://");
-  const [domain, setDomain] = useState("acme.ly");
-  const [slug, setSlug] = useState("");
+  const [title, setTitle] = useState("");
   const [tags, setTags] = useState("");
-  const [utmSource, setUtmSource] = useState("");
-  const [utmMedium, setUtmMedium] = useState("");
-  const [selectedPixels, setSelectedPixels] = useState<Set<string>>(new Set());
-  const [geoEnabled, setGeoEnabled] = useState(true);
-  const [geoCountry, setGeoCountry] = useState("United States");
-  const [geoRedirect, setGeoRedirect] = useState("");
-  const [enableQr, setEnableQr] = useState(false);
-  const [expiryDays, setExpiryDays] = useState("");
+  const [expiryDays, setExpiryDays] = useState("30");
+  const [oneTimeUse, setOneTimeUse] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [created, setCreated] = useState<{ shortUrl: string; redirectUrl: string } | null>(null);
 
-  const DOMAINS = ["acme.ly", "go.acme.com"];
-  const UTM_SOURCES = [
-    { value: "", label: "None" },
-    { value: "newsletter", label: "Newsletter" },
-    { value: "twitter", label: "Twitter/X" },
-    { value: "linkedin", label: "LinkedIn" },
-    { value: "google", label: "Google" },
-    { value: "facebook", label: "Facebook" },
-    { value: "direct", label: "Direct" },
-  ];
-  const UTM_MEDIUMS = [
-    { value: "", label: "None" },
-    { value: "email", label: "Email" },
-    { value: "social", label: "Social" },
-    { value: "paid", label: "Paid" },
-    { value: "organic", label: "Organic" },
-    { value: "cpc", label: "CPC" },
-    { value: "referral", label: "Referral" },
-  ];
-  const GEO_COUNTRIES = ["United States", "United Kingdom", "Germany", "France", "Canada", "Australia", "India", "Brazil"];
-  const PIXEL_OPTIONS = [
-    { id: "meta", label: "Meta Pixel" },
-    { id: "google", label: "Google Ads" },
-    { id: "linkedin", label: "LinkedIn Insight" },
-    { id: "twitter", label: "X/Twitter Pixel" },
-  ];
+  const sx: React.CSSProperties = {
+    width: "100%", height: 32, border: "1px solid var(--border)",
+    background: "var(--sky-100)", padding: "0 8px",
+    fontFamily: "var(--font-body)", fontSize: 12, color: "var(--ink)", outline: "none",
+  };
+  const lx: React.CSSProperties = {
+    display: "block", fontSize: 10, fontWeight: 700, letterSpacing: "0.08em",
+    textTransform: "uppercase" as const, color: "var(--text-secondary)", marginBottom: 3,
+  };
 
-  const inputStyle: React.CSSProperties = {
-    width: "100%",
-    height: 32,
-    border: "1px solid var(--border)",
-    background: "var(--sky-100)",
-    padding: "0 8px",
-    fontFamily: "var(--font-body)",
-    fontSize: 12,
-    color: "var(--ink)",
-    outline: "none",
-  };
-  const labelStyle: React.CSSProperties = {
-    display: "block",
-    fontSize: 10,
-    fontWeight: 700,
-    letterSpacing: "0.08em",
-    textTransform: "uppercase",
-    color: "var(--text-secondary)",
-    marginBottom: 3,
-  };
+  if (created) {
+    return (
+      <Modal open={true} onClose={onClose} title="Link created" width={480}>
+        <div style={{ display: "grid", gap: 14 }}>
+          <div style={{ background: "#ECFDF3", border: "1px solid #A7F3D0", padding: "12px 14px", display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontWeight: 700, color: "#047857", fontSize: 13 }}>✓ Link created and assigned to <em>{campaignName}</em></span>
+          </div>
+          <div>
+            <span style={lx}>Short URL</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, height: 32, border: "1px solid var(--border)", background: "var(--sky-100)", padding: "0 8px" }}>
+              <span style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700 }}>{created.shortUrl}</span>
+              <a href={created.redirectUrl} target="_blank" rel="noopener noreferrer" style={{ color: "var(--text-muted)", display: "flex" }}>
+                <ExternalLink size={12} />
+              </a>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, paddingTop: 4, borderTop: "1px solid var(--border)" }}>
+            <button onClick={() => { setCreated(null); setDestination("https://"); setTitle(""); setTags(""); setExpiryDays("30"); setOneTimeUse(false); }}
+              style={{ flex: 1, height: 32, border: "1px solid var(--ocean-300)", background: "transparent", color: "var(--ocean-600)", fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "var(--font-body)" }}>
+              Add another
+            </button>
+            <button onClick={onClose}
+              style={{ flex: 1, height: 32, border: "none", background: "var(--ocean-500)", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "var(--font-body)" }}>
+              Done
+            </button>
+          </div>
+        </div>
+      </Modal>
+    );
+  }
 
   return (
-    <Modal open={true} onClose={onClose} title="Create link" width={640}>
+    <Modal open={true} onClose={onClose} title={`New link → ${campaignName}`} width={520}>
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          const normalizedSlug = slug.trim().length > 0 ? slug.trim() : `link-${Date.now()}`;
-          onCreate({
-            shortUrl: `${domain}/${normalizedSlug}`,
-            destination: destination.trim(),
-            tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean),
-          });
+          const dest = destination.trim();
+          if (!dest || dest === "https://") { setError("Destination URL is required."); return; }
+          setError(null);
+          setSubmitting(true);
+          const expiryMinutes = expiryDays ? Math.max(1, Number(expiryDays)) * 24 * 60 : 43200;
+          const parsedTags = tags.split(",").map((t) => t.trim()).filter(Boolean);
+          api
+            .post<{ shortCode: string; shortUrl: string }>("/api/v1/short-links", {
+              finalUrl: dest, expiryMinutes, oneTimeUse,
+            })
+            .then((res) => {
+              const shortCode = res.shortCode;
+              const redirectUrl = res.shortUrl || `${API_BASE}/r/${shortCode}`;
+              const displayUrl = `${SHORT_DOMAIN}/${shortCode}`;
+              // Set title, tags, and campaign via update
+              api.put(`/api/admin/v1/links/${shortCode}`, {
+                title: title.trim() || undefined,
+                tags: parsedTags.length > 0 ? parsedTags : undefined,
+                campaignId: campaignId || undefined,
+              }).catch(console.error);
+              onCreate({ shortUrl: displayUrl, destination: dest, tags: parsedTags });
+              setCreated({ shortUrl: displayUrl, redirectUrl });
+            })
+            .catch((err: Error) => setError(err.message))
+            .finally(() => setSubmitting(false));
         }}
-        style={{ display: "grid", gap: 10 }}
+        style={{ display: "grid", gap: 12 }}
       >
-        <label style={{ display: "grid", gap: 3 }}>
-          <span style={labelStyle}>Destination URL *</span>
-          <input value={destination} onChange={(event) => setDestination(event.target.value)} style={inputStyle} required />
-        </label>
-
-        <div style={{ display: "grid", gap: 3 }}>
-          <span style={labelStyle}>Domain</span>
-          <div style={{ display: "flex", gap: 4 }}>
-            <select value={domain} onChange={(event) => setDomain(event.target.value)} style={{ ...inputStyle, width: 130 }}>
-              {DOMAINS.map((d) => (
-                <option key={d} value={d}>{d}</option>
-              ))}
-            </select>
-            <input value={slug} onChange={(event) => setSlug(event.target.value)} placeholder="slug" style={{ ...inputStyle, flex: 1 }} />
+        {error && (
+          <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", color: "#B91C1C", padding: "8px 12px", fontSize: 12, fontWeight: 600 }}>
+            {error}
           </div>
-        </div>
+        )}
 
-        <label style={{ display: "grid", gap: 3 }}>
-          <span style={labelStyle}>Tags</span>
-          <input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="tag1, tag2, tag3" style={inputStyle} />
-        </label>
-
-        <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8 }}>
-          <span style={labelStyle}>Campaign</span>
-          <div style={{ height: 32, border: "1px solid var(--border)", background: "var(--sky-100)", display: "flex", alignItems: "center", padding: "0 8px", color: "var(--ink)", fontSize: 12, fontWeight: 700 }}>
+        <div>
+          <span style={lx}>Campaign</span>
+          <div style={{ height: 32, border: "1px solid var(--border)", background: "var(--sky-200)", display: "flex", alignItems: "center", padding: "0 8px", fontSize: 12, fontWeight: 700, color: "var(--ink)" }}>
             {campaignName}
           </div>
         </div>
 
-        <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8 }}>
-          <span style={labelStyle}>UTM Parameters</span>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
-            <select value={utmSource} onChange={(event) => setUtmSource(event.target.value)} style={inputStyle}>
-              {UTM_SOURCES.map((s) => (
-                <option key={s.value} value={s.value}>{s.label}</option>
-              ))}
-            </select>
-            <select value={utmMedium} onChange={(event) => setUtmMedium(event.target.value)} style={inputStyle}>
-              {UTM_MEDIUMS.map((m) => (
-                <option key={m.value} value={m.value}>{m.label}</option>
-              ))}
-            </select>
-          </div>
-        </div>
+        <label style={{ display: "grid", gap: 3 }}>
+          <span style={lx}>Destination URL <span style={{ color: "#B91C1C" }}>*</span></span>
+          <input value={destination} onChange={(e) => setDestination(e.target.value)}
+            onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = "var(--ocean-500)"; }}
+            onBlur={(e) => { (e.target as HTMLInputElement).style.borderColor = "var(--border)"; }}
+            style={sx} required placeholder="https://your-destination.com/page" autoFocus />
+        </label>
 
-        <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8 }}>
-          <span style={{ ...labelStyle, marginBottom: 4 }}>Tracking Pixels</span>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
-            {PIXEL_OPTIONS.map((pixel) => {
-              const active = selectedPixels.has(pixel.id);
-              return (
-                <button
-                  key={pixel.id}
-                  type="button"
-                  onClick={() => {
-                    setSelectedPixels((previous) => {
-                      const next = new Set(previous);
-                      if (next.has(pixel.id)) next.delete(pixel.id);
-                      else next.add(pixel.id);
-                      return next;
-                    });
-                  }}
-                  style={{
-                    height: 28,
-                    border: `1px solid ${active ? "var(--ocean-400)" : "var(--border)"}`,
-                    background: active ? "var(--ocean-50)" : "var(--sky-100)",
-                    color: active ? "var(--ocean-700)" : "var(--text-secondary)",
-                    fontSize: 12,
-                    fontWeight: 600,
-                    cursor: "pointer",
-                    textAlign: "left",
-                    padding: "0 8px",
-                  }}
-                >
-                  {pixel.label}
-                </button>
-              );
-            })}
-          </div>
-        </div>
+        <label style={{ display: "grid", gap: 3 }}>
+          <span style={lx}>Title <span style={{ color: "var(--text-muted)", fontWeight: 400, textTransform: "none" as const }}>(optional)</span></span>
+          <input value={title} onChange={(e) => setTitle(e.target.value)}
+            onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = "var(--ocean-500)"; }}
+            onBlur={(e) => { (e.target as HTMLInputElement).style.borderColor = "var(--border)"; }}
+            style={sx} placeholder="e.g. Campaign homepage" />
+        </label>
 
-        <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8, display: "grid", gap: 4 }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-            <span style={labelStyle}>Geo redirect rule</span>
-            <button
-              type="button"
-              onClick={() => setGeoEnabled(!geoEnabled)}
-              style={{
-                width: 38,
-                height: 20,
-                background: geoEnabled ? "var(--ocean-500)" : "#E5E7EB",
-                border: `1px solid ${geoEnabled ? "var(--ocean-600)" : "#D1D5DB"}`,
-                borderRadius: 2,
-                cursor: "pointer",
-                position: "relative",
-                transition: "all 0.2s ease",
-                display: "flex",
-                alignItems: "center",
-              }}
-            >
-              <div
-                style={{
-                  position: "absolute",
-                  width: 16,
-                  height: 16,
-                  background: "white",
-                  borderRadius: 0,
-                  border: `1px solid ${geoEnabled ? "var(--ocean-600)" : "#D1D5DB"}`,
-                  left: geoEnabled ? 18 : 1,
-                  transition: "left 0.2s ease",
-                }}
-              />
-            </button>
-          </div>
+        <label style={{ display: "grid", gap: 3 }}>
+          <span style={lx}>Tags <span style={{ color: "var(--text-muted)", fontWeight: 400, textTransform: "none" as const }}>(comma separated)</span></span>
+          <input value={tags} onChange={(e) => setTags(e.target.value)}
+            onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = "var(--ocean-500)"; }}
+            onBlur={(e) => { (e.target as HTMLInputElement).style.borderColor = "var(--border)"; }}
+            style={sx} placeholder="campaign, product" />
+        </label>
 
-          {geoEnabled && (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
-              <select value={geoCountry} onChange={(event) => setGeoCountry(event.target.value)} style={inputStyle}>
-                {GEO_COUNTRIES.map((country) => <option key={country} value={country}>{country}</option>)}
-              </select>
-              <input value={geoRedirect} onChange={(event) => setGeoRedirect(event.target.value)} placeholder="Redirect URL" style={inputStyle} />
-            </div>
-          )}
-        </div>
-
-        <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8 }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <span style={labelStyle}>Auto-generate QR code</span>
-            <button
-              type="button"
-              onClick={() => setEnableQr(!enableQr)}
-              style={{
-                width: 38,
-                height: 20,
-                background: enableQr ? "var(--ocean-500)" : "#E5E7EB",
-                border: `1px solid ${enableQr ? "var(--ocean-600)" : "#D1D5DB"}`,
-                borderRadius: 2,
-                cursor: "pointer",
-                position: "relative",
-                transition: "all 0.2s ease",
-                display: "flex",
-                alignItems: "center",
-              }}
-            >
-              <div
-                style={{
-                  position: "absolute",
-                  width: 16,
-                  height: 16,
-                  background: "white",
-                  borderRadius: 0,
-                  border: `1px solid ${enableQr ? "var(--ocean-600)" : "#D1D5DB"}`,
-                  left: enableQr ? 18 : 1,
-                  transition: "left 0.2s ease",
-                }}
-              />
-            </button>
-          </div>
-        </div>
-
-        <div style={{ marginTop: 8 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           <label style={{ display: "grid", gap: 3 }}>
-            <span style={labelStyle}>Expiry (days)</span>
-            <input value={expiryDays} onChange={(event) => setExpiryDays(event.target.value)} type="number" placeholder="30" style={inputStyle} />
+            <span style={lx}>Expiry <span style={{ color: "var(--text-muted)", fontWeight: 400, textTransform: "none" as const }}>(days)</span></span>
+            <input type="number" min={1} max={365} value={expiryDays} onChange={(e) => setExpiryDays(e.target.value)}
+              onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = "var(--ocean-500)"; }}
+              onBlur={(e) => { (e.target as HTMLInputElement).style.borderColor = "var(--border)"; }}
+              style={sx} placeholder="30" />
           </label>
+          <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+            <span style={lx}>One-time use</span>
+            <div style={{ display: "flex", alignItems: "center", height: 32, gap: 8 }}>
+              <button type="button" onClick={() => setOneTimeUse((v) => !v)}
+                style={{ width: 40, height: 22, background: oneTimeUse ? "var(--ocean-500)" : "#E5E7EB", border: `1px solid ${oneTimeUse ? "var(--ocean-600)" : "#D1D5DB"}`, borderRadius: 2, cursor: "pointer", position: "relative", flexShrink: 0 }}>
+                <div style={{ position: "absolute", width: 16, height: 16, background: "white", border: `1px solid ${oneTimeUse ? "var(--ocean-400)" : "#D1D5DB"}`, top: 2, left: oneTimeUse ? 20 : 2, transition: "left 0.15s" }} />
+              </button>
+              <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>Expires after first click</span>
+            </div>
+          </div>
         </div>
 
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 12, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
-          <button type="button" onClick={onClose} style={{ height: 30, padding: "0 10px", border: "1px solid var(--border)", background: "var(--sky-100)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
+          <button type="button" onClick={onClose}
+            style={{ height: 32, padding: "0 14px", border: "1px solid var(--border)", background: "var(--sky-100)", cursor: "pointer", fontSize: 12, fontWeight: 600, fontFamily: "var(--font-body)" }}>
             Cancel
           </button>
-          <button type="submit" style={{ height: 30, padding: "0 10px", border: "none", background: "var(--ocean-500)", color: "#fff", fontWeight: 700, cursor: "pointer", fontSize: 12 }}>
-            Create link
+          <button type="submit" disabled={submitting}
+            style={{ height: 32, padding: "0 18px", border: "none", background: submitting ? "var(--ocean-300)" : "var(--ocean-500)", color: "#fff", fontWeight: 700, cursor: submitting ? "not-allowed" : "pointer", fontSize: 12, fontFamily: "var(--font-body)" }}>
+            {submitting ? "Creating…" : "Create link"}
           </button>
         </div>
       </form>
@@ -1261,8 +1236,9 @@ function CampaignExistingLinkModal({
    PAGE COMPONENT
 ══════════════════════════════════════════════════════════════════════════ */
 export default function CampaignsPage() {
-  const [campaigns, setCampaigns] = useState<Campaign[]>(INITIAL);
-  const [campaignLinksMap, setCampaignLinksMap] = useState<Record<string, CampaignLink[]>>(CAMPAIGN_LINKS);
+  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  const [campaignLinksMap, setCampaignLinksMap] = useState<Record<string, CampaignLink[]>>({});
+  const [loadingCampaigns, setLoadingCampaigns] = useState(true);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | CampaignStatus>("all");
   const [budgetRange, setBudgetRange] = useState<"all" | "lt1000" | "1000to3000" | "3000to5000" | "gt5000">("all");
@@ -1275,6 +1251,7 @@ export default function CampaignsPage() {
 
   /* Modal state */
   const [showCreate, setShowCreate] = useState(false);
+  const [createdCampaign, setCreatedCampaign] = useState<Campaign | null>(null);
   const [editTarget, setEditTarget] = useState<Campaign | null>(null);
   const [cloneTarget, setCloneTarget] = useState<Campaign | null>(null);
   const [statusTarget, setStatusTarget] = useState<Campaign | null>(null);
@@ -1293,6 +1270,44 @@ export default function CampaignsPage() {
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
+
+  /* Load campaigns from backend */
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingCampaigns(true);
+    api
+      .get<{ total: number; items: CampaignDto[] }>("/api/admin/v1/campaigns?pageSize=100")
+      .then((res) => {
+        if (!cancelled) setCampaigns(res.items.map(mapCampaignDto));
+      })
+      .catch(console.error)
+      .finally(() => { if (!cancelled) setLoadingCampaigns(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  /* Load campaign links when opening detail view */
+  useEffect(() => {
+    if (!viewCampaign) return;
+    const id = viewCampaign.id;
+    api
+      .get<CampaignAnalyticsSummary>(
+        `/api/admin/v1/campaigns/${id}/analytics/summary?lastHours=720&topLinks=20`
+      )
+      .then((res) => {
+        if (!res.topLinks) return;
+        const links: CampaignLink[] = Object.entries(res.topLinks).map(([shortCode, clicks]) => ({
+          id: shortCode,
+          shortUrl: `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5055"}/r/${shortCode}`,
+          destination: "—",
+          clicks: Number(clicks),
+          ctr: 0,
+          tags: [],
+          createdAt: "—",
+        }));
+        setCampaignLinksMap((prev) => ({ ...prev, [id]: links }));
+      })
+      .catch(console.error);
+  }, [viewCampaign?.id]);
 
   /* Filtered list (search + advanced filters + sorting) */
   const filtered = useMemo(() => {
@@ -1391,22 +1406,47 @@ export default function CampaignsPage() {
   function openStatusChange(c: Campaign) { setStatusTarget(c); setNewStatus(c.status); setOpenMenu(null); }
 
   function handleCreate() {
-    const next: Campaign = {
-      ...form, id: `c${Date.now()}`,
-      clicks: 0, links: 0, ctr: 0,
-      createdAt: new Date().toISOString().slice(0, 10),
+    const payload = {
+      name: form.name, description: form.description,
+      status: mapStatusToBackend(form.status),
+      startDateUtc: form.startDate || undefined, endDateUtc: form.endDate || undefined,
+      dailyClickLimit: form.dailyClickLimit || undefined,
+      totalClickLimit: form.totalClickLimit || undefined,
+      budgetAmount: form.budgetAmount || undefined, currency: form.currency,
+      utmSource: form.utmSource || undefined, utmMedium: form.utmMedium || undefined,
+      utmCampaign: form.utmCampaign || undefined,
     };
-    setCampaigns((prev) => [next, ...prev]);
-    setShowCreate(false);
+    api
+      .post<CampaignCreateResponse>("/api/admin/v1/campaigns", payload)
+      .then((res) => {
+        const next: Campaign = {
+          ...form, id: res.id,
+          clicks: 0, links: 0, ctr: 0,
+          createdAt: res.createdAtUtc?.slice(0, 10) ?? new Date().toISOString().slice(0, 10),
+        };
+        setCampaigns((prev) => [next, ...prev]);
+        setCreatedCampaign(next);
+      })
+      .catch((err: Error) => alert(`Failed to create campaign: ${err.message}`));
   }
 
   function handleEdit() {
     if (!editTarget) return;
     const updated = { ...editTarget, ...form };
     setCampaigns((prev) => prev.map((c) => c.id === editTarget.id ? updated : c));
-    // keep detail view in sync
     if (viewCampaign?.id === editTarget.id) setViewCampaign(updated);
     setEditTarget(null);
+    api
+      .put(`/api/admin/v1/campaigns/${editTarget.id}`, {
+        name: form.name, description: form.description,
+        startDateUtc: form.startDate || undefined, endDateUtc: form.endDate || undefined,
+        dailyClickLimit: form.dailyClickLimit || undefined,
+        totalClickLimit: form.totalClickLimit || undefined,
+        budgetAmount: form.budgetAmount || undefined, currency: form.currency,
+        utmSource: form.utmSource || undefined, utmMedium: form.utmMedium || undefined,
+        utmCampaign: form.utmCampaign || undefined,
+      })
+      .catch(console.error);
   }
 
   function handleClone() {
@@ -1421,6 +1461,19 @@ export default function CampaignsPage() {
     };
     setCampaigns((prev) => [cloned, ...prev]);
     setCloneTarget(null);
+    api
+      .post<CampaignCreateResponse>(`/api/admin/v1/campaigns/${cloneTarget.id}/clone`, {
+        newName: cloneForm.newName || `${cloneTarget.name} (Copy)`,
+        startDateUtc: cloneForm.startDate || undefined,
+        endDateUtc: cloneForm.endDate || undefined,
+      })
+      .then((res) => {
+        // Update the local clone with the real ID from backend
+        setCampaigns((prev) => prev.map((c) =>
+          c.id === cloned.id ? { ...c, id: res.id } : c
+        ));
+      })
+      .catch(console.error);
   }
 
   function handleStatusChange() {
@@ -1430,17 +1483,24 @@ export default function CampaignsPage() {
     if (viewCampaign?.id === statusTarget.id) setViewCampaign(updated);
     setStatusTarget(null);
     setStatusReason("");
+    api
+      .post(`/api/admin/v1/campaigns/${statusTarget.id}/status`, {
+        status: mapStatusToBackend(newStatus), reason: statusReason || undefined,
+      })
+      .catch(console.error);
   }
 
   function handleArchive(id: string) {
     setCampaigns((p) => p.map((c) => c.id === id ? { ...c, status: "Archived" as const } : c));
     if (viewCampaign?.id === id) setViewCampaign((v) => v ? { ...v, status: "Archived" } : v);
     setOpenMenu(null);
+    api.post(`/api/admin/v1/campaigns/${id}/archive`, {}).catch(console.error);
   }
   function handleRestore(id: string) {
     setCampaigns((p) => p.map((c) => c.id === id ? { ...c, status: "Paused" as const } : c));
     if (viewCampaign?.id === id) setViewCampaign((v) => v ? { ...v, status: "Paused" } : v);
     setOpenMenu(null);
+    api.post(`/api/admin/v1/campaigns/${id}/restore`, {}).catch(console.error);
   }
   function handleDelete(id: string) {
     setCampaigns((p) => p.filter((c) => c.id !== id));
@@ -1800,19 +1860,64 @@ export default function CampaignsPage() {
         </div>
       )}
 
-      {filtered.length === 0 && campaigns.length > 0 && (
+      {loadingCampaigns && campaigns.length === 0 && (
+        <div style={{ textAlign: "center", padding: "48px 0", color: "var(--text-muted)", fontSize: 14 }}>
+          Loading campaigns…
+        </div>
+      )}
+
+      {!loadingCampaigns && filtered.length === 0 && campaigns.length > 0 && (
         <div style={{ textAlign: "center", padding: "48px 0", color: "var(--text-muted)", fontSize: 14 }}>
           No campaigns match the current filters.
         </div>
       )}
 
       {/* ── Modals ────────────────────────────────────────────────────── */}
-      <Modal open={showCreate} onClose={() => setShowCreate(false)} title="Create campaign" width={640}>
-        <CampaignFormBody form={form} setForm={setForm} />
-        <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
-          <SaveBtn label="Create campaign" onClick={handleCreate} disabled={!form.name.trim()} />
-          <CancelBtn onClick={() => setShowCreate(false)} />
-        </div>
+      <Modal open={showCreate} onClose={() => { setShowCreate(false); setCreatedCampaign(null); }} title={createdCampaign ? "Campaign created" : "Create campaign"} width={640}>
+        {createdCampaign ? (
+          <div style={{ display: "grid", gap: 16 }}>
+            <div style={{ background: "#ECFDF3", border: "1px solid #A7F3D0", padding: "14px 16px", display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ fontWeight: 700, color: "#047857", fontSize: 13 }}>✓ Campaign <em>{createdCampaign.name}</em> created successfully</span>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              {([
+                ["Name", createdCampaign.name],
+                ["Status", createdCampaign.status],
+                ["Start date", fmtDate(createdCampaign.startDate)],
+                ["End date", fmtDate(createdCampaign.endDate)],
+                ["Currency", createdCampaign.currency],
+                ["Budget", createdCampaign.budgetAmount ? `${createdCampaign.budgetAmount.toLocaleString()} ${createdCampaign.currency}` : "—"],
+              ] as [string, string][]).map(([label, value]) => (
+                <div key={label} style={{ borderLeft: "2px solid var(--ocean-200)", paddingLeft: 8 }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--text-muted)", marginBottom: 2 }}>{label}</div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ink)" }}>{value || "—"}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: 8, paddingTop: 4, borderTop: "1px solid var(--border)" }}>
+              <button
+                onClick={() => { setCreatedCampaign(null); setForm(blankForm()); }}
+                style={{ flex: 1, height: 32, border: "1px solid var(--ocean-300)", background: "transparent", color: "var(--ocean-600)", fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "var(--font-body)" }}
+              >
+                Create another
+              </button>
+              <button
+                onClick={() => { setShowCreate(false); setCreatedCampaign(null); }}
+                style={{ flex: 1, height: 32, border: "none", background: "var(--ocean-500)", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "var(--font-body)" }}
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <CampaignFormBody form={form} setForm={setForm} />
+            <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
+              <SaveBtn label="Create campaign" onClick={handleCreate} disabled={!form.name.trim()} />
+              <CancelBtn onClick={() => setShowCreate(false)} />
+            </div>
+          </>
+        )}
       </Modal>
 
       <Modal open={!!editTarget} onClose={() => setEditTarget(null)} title={`Edit: ${editTarget?.name ?? ""}`} width={520}>

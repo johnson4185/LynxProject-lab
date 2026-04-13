@@ -15,12 +15,24 @@ import {
   Trash2,
 } from "lucide-react";
 import PageHeader from "@/platform/components/PageHeader";
-import { dashboardData } from "@/platform/lib/dashboardData";
-import type { Link as LinkEntity } from "@/platform/types/link";
+import { api } from "@/platform/lib/api";
 
 type DetailTab = "details" | "analytics" | "qr";
 
-type LinkRecord = LinkEntity & {
+interface LinkRecord {
+  id: string;
+  shortUrl: string;    // display label, e.g. url.ify/Zt6hRrwx
+  redirectUrl: string; // real working URL, e.g. http://localhost:5055/r/Zt6hRrwx
+  destination: string;
+  slug: string;
+  domain: string;
+  createdAt: string;
+  createdBy: string;
+  workspaceId: string;
+  tags?: string[];
+  expiresAt?: string;
+  qrCodeUrl?: string;
+  utm?: Record<string, string>;
   isRevoked?: boolean;
   revokedAt?: string;
   campaignAssigned?: boolean;
@@ -28,7 +40,58 @@ type LinkRecord = LinkEntity & {
   geoRuleEnabled?: boolean;
   geoCountry?: string;
   geoRedirectUrl?: string;
-};
+  stats: {
+    clicks: number;
+    ctr: number;
+    timeline: Array<{ date: string; clicks: number }>;
+    referrers: Record<string, number>;
+    devices: Record<string, number>;
+    geo: Record<string, number>;
+    campaigns: Record<string, number>;
+  };
+}
+
+interface LinkListItemDto {
+  shortCode: string;
+  status: string;
+  title?: string | null;
+  clickCount: number;
+  createdAtUtc: string;
+  expiryUtc?: string | null;
+  revokedAtUtc?: string | null;
+  tags?: string[] | null;
+  finalUrl?: string | null;
+}
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5055";
+const SHORT_DOMAIN = process.env.NEXT_PUBLIC_SHORT_DOMAIN ?? "url.ify";
+
+function mapDto(item: LinkListItemDto): LinkRecord {
+  return {
+    id: item.shortCode,
+    shortUrl: `${SHORT_DOMAIN}/${item.shortCode}`,
+    redirectUrl: `${API_BASE}/r/${item.shortCode}`,
+    destination: item.finalUrl ?? "—",
+    slug: item.shortCode,
+    domain: SHORT_DOMAIN,
+    createdAt: item.createdAtUtc,
+    createdBy: "",
+    workspaceId: "",
+    tags: item.tags ?? [],
+    expiresAt: item.expiryUtc ?? undefined,
+    isRevoked: item.status === "revoked",
+    revokedAt: item.revokedAtUtc ?? undefined,
+    stats: {
+      clicks: item.clickCount,
+      ctr: 0,
+      timeline: [],
+      referrers: {},
+      devices: {},
+      geo: {},
+      campaigns: {},
+    },
+  };
+}
 
 function getStatus(link: LinkRecord): "active" | "revoked" | "expired" {
   if (link.isRevoked) return "revoked";
@@ -52,10 +115,16 @@ export default function LinkDetailsPage() {
   const [isQrEditing, setIsQrEditing] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  const [link, setLink] = useState<LinkRecord | null>(() => {
-    const found = dashboardData.links.find((item) => item.id === params.id);
-    return found ? { ...found } : null;
-  });
+  const [link, setLink] = useState<LinkRecord | null>(null);
+  const [loadingLink, setLoadingLink] = useState(true);
+
+  useEffect(() => {
+    api
+      .get<LinkListItemDto>(`/api/admin/v1/links/${params.id}`)
+      .then((res) => setLink(mapDto(res)))
+      .catch(() => setLink(null))
+      .finally(() => setLoadingLink(false));
+  }, [params.id]);
 
   const [editDestination, setEditDestination] = useState(link?.destination ?? "");
   const [editDomain, setEditDomain] = useState(link?.domain ?? "");
@@ -115,6 +184,14 @@ export default function LinkDetailsPage() {
   const geoRows = useMemo(() => (link ? Object.entries(link.stats.geo).sort((a, b) => b[1] - a[1]) : []), [link]);
   const campaignRows = useMemo(() => (link ? Object.entries(link.stats.campaigns ?? {}).sort((a, b) => b[1] - a[1]) : []), [link]);
 
+  if (loadingLink) {
+    return (
+      <div style={{ maxWidth: 980, margin: "0 auto", padding: "48px 0", textAlign: "center", color: "var(--text-muted)" }}>
+        Loading link…
+      </div>
+    );
+  }
+
   if (!link) {
     return (
       <div style={{ maxWidth: 980, margin: "0 auto" }}>
@@ -141,7 +218,7 @@ export default function LinkDetailsPage() {
               <ArrowLeft size={13} />
               Back
             </Link>
-            <a href={`https://${link.shortUrl}`} target="_blank" rel="noopener noreferrer" style={{ height: 36, display: "inline-flex", alignItems: "center", gap: 6, padding: "0 12px", border: "1px solid var(--border)", background: "var(--sky-100)", color: "var(--text-secondary)", textDecoration: "none", fontWeight: 700, fontSize: 12 }}>
+            <a href={link.destination !== "—" ? link.destination : `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5055"}/r/${link.id}`} target="_blank" rel="noopener noreferrer" style={{ height: 36, display: "inline-flex", alignItems: "center", gap: 6, padding: "0 12px", border: "1px solid var(--border)", background: "var(--sky-100)", color: "var(--text-secondary)", textDecoration: "none", fontWeight: 700, fontSize: 12 }}>
               <ExternalLink size={13} />
               Open link
             </a>
@@ -165,7 +242,7 @@ export default function LinkDetailsPage() {
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
             <button
               onClick={() => {
-                navigator.clipboard.writeText(link.shortUrl).catch(() => {});
+                navigator.clipboard.writeText(link.redirectUrl).catch(() => {});
                 setCopied(true);
                 setTimeout(() => setCopied(false), 1200);
               }}

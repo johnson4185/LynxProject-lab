@@ -32,6 +32,7 @@ public class LinkListItemDto
 {
     public string ShortCode { get; set; } = default!;
     public string Status { get; set; } = default!; // active|revoked|expired
+    public string? FinalUrl { get; set; }
     public string? Title { get; set; }
     public Guid? CampaignId { get; set; }
     public int ClickCount { get; set; }

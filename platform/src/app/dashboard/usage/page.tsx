@@ -1,5 +1,6 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend,
 } from "recharts";
@@ -9,18 +10,17 @@ import {
 import Link from "next/link";
 import PageHeader from "@/platform/components/PageHeader";
 import Panel from "@/platform/components/Panel";
+import { api } from "@/platform/lib/api";
 
-/* ─── Metric definitions ─────────────────────────────────────────────────── */
-const METRICS = [
-  { key: "links",   label: "Short links",       sublabel: "Created this month",       used: 2840,  limit: null, icon: Link2,     delta: +18 },
-  { key: "clicks",  label: "Clicks tracked",    sublabel: "This billing period",       used: 84320, limit: null, icon: Activity,  delta: +24 },
-  { key: "domains", label: "Custom domains",    sublabel: "Active",                    used: 3,     limit: null, icon: Globe,     delta: 0   },
-  { key: "seats",   label: "Team seats",        sublabel: "Active members",            used: 6,     limit: null, icon: Users,     delta: +1  },
-  { key: "api",     label: "API requests",      sublabel: "This billing period",       used: 31640, limit: null, icon: Key,       delta: +12 },
-  { key: "qr",      label: "QR codes",          sublabel: "Total generated",           used: 28,    limit: null, icon: QrCode,    delta: +3  },
-];
+/* ─── Metric shape ───────────────────────────────────────────────────────── */
+interface MetricValue {
+  links: number;
+  clicks: number;
+  domains: number;
+  api: number;
+}
 
-/* ─── Monthly trend ──────────────────────────────────────────────────────── */
+/* ─── Monthly trend (static — no per-metric timeseries API) ─────────────── */
 const MONTHLY_TREND = [
   { month: "Sep", links: 1240,  clicks: 38400,  api: 12000 },
   { month: "Oct", links: 1680,  clicks: 52100,  api: 18200 },
@@ -45,6 +45,37 @@ const TICK_STYLE = {
    PAGE
 ═══════════════════════════════════════════════════════════════════════════ */
 export default function UsagePage() {
+  const [metrics, setMetrics] = useState<MetricValue>({ links: 0, clicks: 0, domains: 0, api: 0 });
+
+  useEffect(() => {
+    // Fetch total links count
+    api
+      .get<{ total: number }>("/api/admin/v1/links?pageSize=1")
+      .then((res) => setMetrics((prev) => ({ ...prev, links: res.total })))
+      .catch(console.error);
+
+    // Fetch total clicks + API requests from traffic summary
+    api
+      .get<{ totalRequests: number; uniqueIps: number }>("/api/v1/analytics/traffic/summary?lastHours=720")
+      .then((res) => setMetrics((prev) => ({ ...prev, clicks: res.totalRequests, api: res.totalRequests })))
+      .catch(console.error);
+
+    // Fetch domain count
+    api
+      .get<{ total: number }>("/api/v1/tenant/domains?pageSize=1")
+      .then((res) => setMetrics((prev) => ({ ...prev, domains: res.total })))
+      .catch(console.error);
+  }, []);
+
+  const METRICS = [
+    { key: "links",   label: "Short links",    sublabel: "Created all time",        used: metrics.links,   limit: null, icon: Link2,    delta: +18 },
+    { key: "clicks",  label: "Clicks tracked", sublabel: "This billing period",     used: metrics.clicks,  limit: null, icon: Activity, delta: +24 },
+    { key: "domains", label: "Custom domains", sublabel: "Active",                  used: metrics.domains, limit: null, icon: Globe,    delta: 0   },
+    { key: "seats",   label: "Team seats",     sublabel: "Active members",          used: 6,               limit: null, icon: Users,    delta: +1  },
+    { key: "api",     label: "API requests",   sublabel: "This billing period",     used: metrics.api,     limit: null, icon: Key,      delta: +12 },
+    { key: "qr",      label: "QR codes",       sublabel: "Total generated",         used: 0,               limit: null, icon: QrCode,   delta: +3  },
+  ];
+
   return (
     <div style={{ maxWidth: 1100, margin: "0 auto" }}>
       <PageHeader

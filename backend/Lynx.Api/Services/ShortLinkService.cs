@@ -96,7 +96,7 @@ public class ShortLinkService : IShortLinkService
 
                 var entity = new ShortLink
                 {
-                    TenantId = tenantId,                 // ✅ IMPORTANT FIX
+                    TenantId = tenantId,
                     ShortCode = shortCode,
                     SecureToken = secureToken,
                     ExpiryUtc = expiryUtc,

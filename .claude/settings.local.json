@@ -30,7 +30,8 @@
       "Bash(cp -r /c/sniplyv2/frontend/src/app/page.tsx /c/sniplyv2/website/)",
       "Bash(cp -r /c/sniplyv2/frontend/src/components /c/sniplyv2/website/src/)",
       "Bash(rm -f /c/sniplyv2/platform/.env.local)",
-      "Bash(rm -f /c/sniplyv2/platform/src/platform/lib/api.ts)"
+      "Bash(rm -f /c/sniplyv2/platform/src/platform/lib/api.ts)",
+      "Bash(dotnet ef:*)"
     ]
   }
 }

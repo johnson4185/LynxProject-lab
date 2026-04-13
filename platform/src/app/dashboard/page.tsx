@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import {
   Area, AreaChart, Cell, PieChart, Pie,
@@ -16,10 +16,56 @@ import {
 import PageHeader from "@/platform/components/PageHeader";
 import Panel from "@/platform/components/Panel";
 import StatCard from "@/platform/components/StatCard";
-import { dashboardData } from "@/platform/lib/dashboardData";
+import { api } from "@/platform/lib/api";
 import {
   TOOLTIP_STYLE, DEVICE_COLORS, GEO_COLORS,
 } from "@/platform/constants/chart";
+
+/* ─── Backend DTO types ──────────────────────────────────────────────────── */
+interface TrafficSummaryDto {
+  totalRequests: number;
+  uniqueIps: number;
+}
+
+interface TimeSeriesPointDto {
+  timestamp: string;
+  count: number;
+}
+
+interface LinkListItemDto {
+  shortCode: string;
+  clickCount: number;
+  status: string;
+  tags?: string[] | null;
+  expiryUtc?: string;
+  createdAtUtc?: string;
+  title?: string | null;
+}
+
+interface TopLinkRecord {
+  id: string;
+  shortUrl: string;
+  destination: string;
+  stats: { clicks: number; ctr: number };
+}
+
+/* ─── Static fallback data (not available from API) ─────────────────────── */
+const STATIC_DEVICES = [
+  { name: "Desktop", value: 60 },
+  { name: "Mobile",  value: 32 },
+  { name: "Tablet",  value: 8  },
+];
+const STATIC_GEOS = [
+  { name: "US", value: 420 },
+  { name: "GB", value: 185 },
+  { name: "DE", value: 97  },
+  { name: "CA", value: 74  },
+  { name: "AU", value: 48  },
+];
+const STATIC_REFERRERS = [
+  { name: "google.com",  value: 512 },
+  { name: "twitter.com", value: 184 },
+];
 
 /* ─── Constants ─────────────────────────────────────────────────────────── */
 const DEVICE_ICONS: Record<string, React.ReactNode> = {
@@ -57,17 +103,64 @@ const BTN_GHOST: React.CSSProperties = {
 /* ─── Component ─────────────────────────────────────────────────────────── */
 export default function OverviewDashboard() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [trafficSummary, setTrafficSummary] = useState<TrafficSummaryDto | null>(null);
+  const [timeseries, setTimeseries] = useState<Array<{ date: string; clicks: number }>>([]);
+  const [topLinks, setTopLinks] = useState<TopLinkRecord[]>([]);
+  const [totalLinks, setTotalLinks] = useState(0);
 
-  const topLinks = [...dashboardData.links].sort((a, b) => b.stats.clicks - a.stats.clicks).slice(0, 5);
-  const devices = dashboardData.devices;
+  useEffect(() => {
+    let cancelled = false;
+
+    // Fetch traffic summary
+    api
+      .get<TrafficSummaryDto>("/api/v1/analytics/traffic/summary?lastHours=168")
+      .then((res) => { if (!cancelled) setTrafficSummary(res); })
+      .catch(console.error);
+
+    // Fetch timeseries
+    api
+      .get<TimeSeriesPointDto[]>("/api/v1/analytics/traffic/timeseries?lastHours=168&interval=day")
+      .then((res) => {
+        if (!cancelled) {
+          const mapped = res.map((pt, i) => {
+            const d = new Date(pt.timestamp);
+            const date = isNaN(d.getTime()) ? String(pt.timestamp) : d.toISOString().slice(0, 10);
+            return { date, clicks: pt.count, prev: Math.round(pt.count * (0.65 + i * 0.04)) };
+          });
+          setTimeseries(mapped);
+        }
+      })
+      .catch(console.error);
+
+    // Fetch top links via admin links API (sorted by clickCount)
+    api
+      .get<{ total: number; items: LinkListItemDto[] }>("/api/admin/v1/links?pageSize=200")
+      .then((res) => {
+        if (!cancelled) {
+          setTotalLinks(res.total);
+          const top: TopLinkRecord[] = res.items
+            .sort((a, b) => b.clickCount - a.clickCount)
+            .slice(0, 5)
+            .map((item) => ({
+              id: item.shortCode,
+              shortUrl: `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5055"}/r/${item.shortCode}`,
+              destination: "—",
+              stats: { clicks: item.clickCount, ctr: 0 },
+            }));
+          setTopLinks(top);
+        }
+      })
+      .catch(console.error);
+
+    return () => { cancelled = true; };
+  }, []);
+
+  const devices = STATIC_DEVICES;
   const totalDeviceClicks = devices.reduce((s, d) => s + d.value, 0);
-  const geos = dashboardData.geos.slice(0, 5);
-  const areaData = dashboardData.clicksTimeline.map((d, i) => ({
-    ...d,
-    prev: Math.round(d.clicks * (0.65 + i * 0.04)),
-  }));
-  const topReferrer = dashboardData.referrers[0];
-  const topGeo = dashboardData.geos[0];
+  const geos = STATIC_GEOS;
+  const areaData = timeseries.length > 0 ? timeseries : [];
+  const topReferrer = STATIC_REFERRERS[0];
+  const topGeo = STATIC_GEOS[0];
 
   const handleCopy = (id: string, text: string) => {
     navigator.clipboard.writeText(text).then(() => {
@@ -98,11 +191,11 @@ export default function OverviewDashboard() {
 
       {/* ── 5-col KPI row ─────────────────────────────────────────────────── */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 8, marginBottom: 12 }}>
-        <StatCard compact label="Active Links"    value={dashboardData.totals.links}                  note="All time"         trend={12} icon={<Link2 size={16} />} />
-        <StatCard compact label="Total Clicks"    value={dashboardData.totals.clicks.toLocaleString()} note="Last 7 days"      trend={8}  icon={<MousePointerClick size={16} />} />
-        <StatCard compact label="Unique Visitors" value="2,180"                                      note="Last 7 days"      trend={5}  icon={<Users size={16} />} />
-        <StatCard compact label="Avg. CTR"        value={`${dashboardData.totals.avgCtr}%`}            note="Across all links" trend={-2} icon={<TrendingUp size={16} />} />
-        <StatCard compact label="QR-Enabled"      value={dashboardData.totals.withQr}                 note="Ready for print"  trend={0}  icon={<QrCode size={16} />} />
+        <StatCard compact label="Active Links"    value={totalLinks || "—"}                                                       note="All time"         trend={12} icon={<Link2 size={16} />} />
+        <StatCard compact label="Total Clicks"    value={trafficSummary?.totalRequests?.toLocaleString() ?? "—"}    note="Last 7 days"      trend={8}  icon={<MousePointerClick size={16} />} />
+        <StatCard compact label="Unique Visitors" value={trafficSummary?.uniqueIps?.toLocaleString() ?? "—"}        note="Last 7 days"      trend={5}  icon={<Users size={16} />} />
+        <StatCard compact label="Avg. CTR"        value="—"                                                                        note="Across all links" trend={-2} icon={<TrendingUp size={16} />} />
+        <StatCard compact label="QR-Enabled"      value="—"                                                                        note="Ready for print"  trend={0}  icon={<QrCode size={16} />} />
       </div>
 
       {/* ── Quick Actions ──────────────────────────────────────────────────── */}
@@ -304,7 +397,7 @@ export default function OverviewDashboard() {
           title="Recent Activity"
           subtitle="Latest workspace events"
           action={
-            <button style={{ background: "none", border: "none", cursor: "pointer", color: "var(--ocean-500)", display: "flex", alignItems: "center", gap: 4, fontSize: 12, fontWeight: 700, fontFamily: "var(--font-body)" }}>
+            <button suppressHydrationWarning style={{ background: "none", border: "none", cursor: "pointer", color: "var(--ocean-500)", display: "flex", alignItems: "center", gap: 4, fontSize: 12, fontWeight: 700, fontFamily: "var(--font-body)" }}>
               <RefreshCw size={12} /> Refresh
             </button>
           }

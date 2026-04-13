@@ -20,14 +20,26 @@ import {
 import PageHeader from "@/platform/components/PageHeader";
 import Modal from "@/platform/components/Modal";
 import StatCard from "@/platform/components/StatCard";
-import { dashboardData } from "@/platform/lib/dashboardData";
-import type { Link as LinkEntity } from "@/platform/types/link";
+import { api } from "@/platform/lib/api";
 
 type StatusFilter = "all" | "active" | "revoked" | "expired";
 type DrawerTab = "metadata" | "analytics";
 type DrawerMetaSubTab = "overview" | "qr";
 
-type LinkRecord = LinkEntity & {
+type LinkRecord = {
+  id: string;
+  shortUrl: string;    // display label, e.g. url.ify/Zt6hRrwx
+  redirectUrl: string; // real working URL, e.g. http://localhost:5055/r/Zt6hRrwx
+  destination: string;
+  slug: string;
+  domain: string;
+  createdAt: string;
+  createdBy: string;
+  workspaceId: string;
+  tags?: string[];
+  expiresAt?: string;
+  qrCodeUrl?: string;
+  utm?: Record<string, string>;
   isRevoked?: boolean;
   revokedAt?: string;
   title?: string;
@@ -40,7 +52,61 @@ type LinkRecord = LinkEntity & {
   qrMargin?: number;
   qrDark?: string;
   qrLight?: string;
+  stats: {
+    clicks: number;
+    ctr: number;
+    timeline: Array<{ date: string; clicks: number }>;
+    referrers: Record<string, number>;
+    devices: Record<string, number>;
+    geo: Record<string, number>;
+    campaigns?: Record<string, number>;
+  };
 };
+
+interface LinkListItemDto {
+  shortCode: string;
+  status: string;
+  title?: string | null;
+  campaignId?: string | null;
+  clickCount: number;
+  createdAtUtc: string;
+  expiryUtc: string;
+  isActive: boolean;
+  revokedAtUtc?: string | null;
+  tags?: string[] | null;
+  finalUrl?: string | null;
+}
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5055";
+const SHORT_DOMAIN = process.env.NEXT_PUBLIC_SHORT_DOMAIN ?? "url.ify";
+
+function mapDto(item: LinkListItemDto): LinkRecord {
+  return {
+    id: item.shortCode,
+    shortUrl: `${SHORT_DOMAIN}/${item.shortCode}`,
+    redirectUrl: `${API_BASE}/r/${item.shortCode}`,
+    destination: item.finalUrl ?? "—",
+    slug: item.shortCode,
+    domain: SHORT_DOMAIN,
+    createdAt: item.createdAtUtc,
+    createdBy: "",
+    workspaceId: "",
+    tags: item.tags ?? [],
+    expiresAt: item.expiryUtc,
+    isRevoked: item.status === "revoked",
+    revokedAt: item.revokedAtUtc ?? undefined,
+    title: item.title ?? undefined,
+    stats: {
+      clicks: item.clickCount,
+      ctr: 0,
+      timeline: [],
+      referrers: {},
+      devices: {},
+      geo: {},
+      campaigns: {},
+    },
+  };
+}
 
 function getCampaignName(link: LinkRecord): string {
   const campaignKeys = Object.keys(link.stats.campaigns ?? {});
@@ -88,7 +154,9 @@ function formatDate(iso: string): string {
 }
 
 export default function LinksPage() {
-  const [links, setLinks] = useState<LinkRecord[]>(() => dashboardData.links.map((link) => ({ ...link })));
+  const [links, setLinks] = useState<LinkRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [apiError, setApiError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [campaignFilter, setCampaignFilter] = useState<string>("all");
@@ -155,6 +223,28 @@ export default function LinksPage() {
   };
 
   useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setApiError(null);
+    api
+      .get<{ total: number; page: number; pageSize: number; items: LinkListItemDto[] }>(
+        "/api/admin/v1/links?pageSize=200"
+      )
+      .then((res) => {
+        if (!cancelled) setLinks(res.items.map(mapDto));
+      })
+      .catch((err: Error) => {
+        if (!cancelled) setApiError(err.message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     return () => clearCopyTimer();
   }, []);
 
@@ -199,6 +289,11 @@ export default function LinksPage() {
       ids.forEach((id) => next.delete(id));
       return next;
     });
+    if (ids.length === 1) {
+      api.post(`/api/admin/v1/links/${ids[0]}/revoke`).catch(console.error);
+    } else {
+      api.post("/api/admin/v1/links/bulk/revoke", { shortCodes: ids }).catch(console.error);
+    }
   };
 
   const reactivateLinks = (ids: string[]) => {
@@ -215,10 +310,14 @@ export default function LinksPage() {
       ids.forEach((id) => next.delete(id));
       return next;
     });
+    ids.forEach((id) =>
+      api.post(`/api/admin/v1/links/${id}/activate`).catch(console.error)
+    );
   };
 
   const reactivateLink = (id: string) => {
     setLinks((previous) => previous.map((link) => (link.id === id ? { ...link, isRevoked: false, revokedAt: undefined } : link)));
+    api.post(`/api/admin/v1/links/${id}/activate`).catch(console.error);
   };
 
   const exportSelectedCSV = () => {
@@ -465,7 +564,19 @@ export default function LinksPage() {
           </thead>
 
           <tbody>
-            {filtered.length === 0 ? (
+            {loading ? (
+              <tr>
+                <td colSpan={9} style={{ padding: "56px 16px", textAlign: "center", color: "var(--text-muted)" }}>
+                  Loading links…
+                </td>
+              </tr>
+            ) : apiError ? (
+              <tr>
+                <td colSpan={9} style={{ padding: "56px 16px", textAlign: "center", color: "#B91C1C" }}>
+                  {apiError}
+                </td>
+              </tr>
+            ) : filtered.length === 0 ? (
               <tr>
                 <td colSpan={9} style={{ padding: "56px 16px", textAlign: "center", color: "var(--text-muted)" }}>
                   <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
@@ -519,11 +630,11 @@ export default function LinksPage() {
                     <td style={{ padding: "12px 14px" }}>
                       <div style={{ display: "flex", justifyContent: "center", gap: 5 }}>
                         <button
-                          onClick={() => copyShortUrl(link.shortUrl)}
+                          onClick={() => copyShortUrl(link.redirectUrl)}
                           title="Copy"
-                          style={iconBtnStyle(copied === link.shortUrl ? "var(--sage)" : "var(--text-muted)")}
+                          style={iconBtnStyle(copied === link.redirectUrl ? "var(--sage)" : "var(--text-muted)")}
                         >
-                          {copied === link.shortUrl ? <Check size={12} /> : <Copy size={12} />}
+                          {copied === link.redirectUrl ? <Check size={12} /> : <Copy size={12} />}
                         </button>
 
                         <Link
@@ -534,7 +645,7 @@ export default function LinksPage() {
                           <Eye size={12} />
                         </Link>
 
-                        <a href={`https://${link.shortUrl}`} target="_blank" rel="noopener noreferrer" title="Open short link" style={{ ...iconBtnStyle("var(--text-muted)"), textDecoration: "none" }}>
+                        <a href={link.redirectUrl} target="_blank" rel="noopener noreferrer" title="Open short link" style={{ ...iconBtnStyle("var(--text-muted)"), textDecoration: "none" }}>
                           <ExternalLink size={12} />
                         </a>
 
@@ -652,333 +763,240 @@ function SimpleCreateModal({
   onCreate: (link: LinkRecord) => void;
 }) {
   const [destination, setDestination] = useState("https://");
-  const [domain, setDomain] = useState("acme.ly");
-  const [slug, setSlug] = useState("");
+  const [title, setTitle] = useState("");
   const [tags, setTags] = useState("");
-  const [assignCampaign, setAssignCampaign] = useState(false);
-  const [campaign, setCampaign] = useState("summer-sale");
-  const [utmSource, setUtmSource] = useState("");
-  const [utmMedium, setUtmMedium] = useState("");
-  const [selectedPixels, setSelectedPixels] = useState<Set<string>>(new Set());
-  const [geoEnabled, setGeoEnabled] = useState(true);
-  const [geoCountry, setGeoCountry] = useState("United States");
-  const [geoRedirect, setGeoRedirect] = useState("");
-  const [enableQr, setEnableQr] = useState(false);
-  const [expiryDays, setExpiryDays] = useState("");
+  const [expiryDays, setExpiryDays] = useState("30");
+  const [oneTimeUse, setOneTimeUse] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [created, setCreated] = useState<{ shortUrl: string; redirectUrl: string; destination: string } | null>(null);
 
-  const DOMAINS = ["acme.ly", "go.acme.com"];
-
-  const UTM_SOURCES = [
-    { value: "", label: "None" },
-    { value: "newsletter", label: "Newsletter" },
-    { value: "twitter", label: "Twitter/X" },
-    { value: "linkedin", label: "LinkedIn" },
-    { value: "google", label: "Google" },
-    { value: "facebook", label: "Facebook" },
-    { value: "direct", label: "Direct" },
-  ];
-
-  const UTM_MEDIUMS = [
-    { value: "", label: "None" },
-    { value: "email", label: "Email" },
-    { value: "social", label: "Social" },
-    { value: "paid", label: "Paid" },
-    { value: "organic", label: "Organic" },
-    { value: "cpc", label: "CPC" },
-    { value: "referral", label: "Referral" },
-  ];
-
-  const CAMPAIGNS = [
-    { value: "summer-sale", label: "Summer Sale" },
-    { value: "product-launch", label: "Product Launch" },
-    { value: "retargeting", label: "Retargeting" },
-    { value: "seasonal", label: "Seasonal" },
-  ];
-
-  const GEO_COUNTRIES = ["United States", "United Kingdom", "Germany", "France", "Canada", "Australia", "India", "Brazil"];
-
-  const PIXEL_OPTIONS = [
-    { id: "meta", label: "Meta Pixel" },
-    { id: "google", label: "Google Ads" },
-    { id: "linkedin", label: "LinkedIn Insight" },
-    { id: "twitter", label: "X/Twitter Pixel" },
-  ];
-
-  const inputStyle: React.CSSProperties = {
-    width: "100%",
-    height: 32,
-    border: "1px solid var(--border)",
-    background: "var(--sky-100)",
-    padding: "0 8px",
-    fontFamily: "var(--font-body)",
-    fontSize: 12,
-    color: "var(--ink)",
-    outline: "none",
+  const sx: React.CSSProperties = {
+    width: "100%", height: 32, border: "1px solid var(--border)",
+    background: "var(--sky-100)", padding: "0 8px",
+    fontFamily: "var(--font-body)", fontSize: 12, color: "var(--ink)", outline: "none",
+  };
+  const lx: React.CSSProperties = {
+    display: "block", fontSize: 10, fontWeight: 700, letterSpacing: "0.08em",
+    textTransform: "uppercase", color: "var(--text-secondary)", marginBottom: 3,
   };
 
-  const labelStyle: React.CSSProperties = {
-    display: "block",
-    fontSize: 10,
-    fontWeight: 700,
-    letterSpacing: "0.08em",
-    textTransform: "uppercase",
-    color: "var(--text-secondary)",
-    marginBottom: 3,
-  };
+  function resetForm() {
+    setDestination("https://");
+    setTitle("");
+    setTags("");
+    setExpiryDays("30");
+    setOneTimeUse(false);
+    setError(null);
+    setCreated(null);
+  }
 
+  /* ── Success screen ── */
+  if (created) {
+    return (
+      <Modal open={true} onClose={onClose} title="Link created" width={520}>
+        <div style={{ display: "grid", gap: 16 }}>
+          <div style={{ background: "#ECFDF3", border: "1px solid #A7F3D0", padding: "14px 16px", display: "flex", alignItems: "center", gap: 10 }}>
+            <Check size={18} color="#047857" />
+            <span style={{ fontWeight: 700, color: "#047857", fontSize: 13 }}>Link created successfully</span>
+          </div>
+
+          <div style={{ display: "grid", gap: 8 }}>
+            <div>
+              <span style={lx}>Short URL</span>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, height: 32, border: "1px solid var(--border)", background: "var(--sky-100)", padding: "0 8px" }}>
+                <span style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--ink)", fontWeight: 700 }}>{created.shortUrl}</span>
+                <button
+                  type="button"
+                  onClick={() => navigator.clipboard.writeText(created.redirectUrl).catch(() => {})}
+                  style={{ border: "none", background: "transparent", cursor: "pointer", padding: 0, display: "flex", alignItems: "center", color: "var(--text-muted)" }}
+                  title="Copy redirect URL"
+                >
+                  <Copy size={12} />
+                </button>
+                <a href={created.redirectUrl} target="_blank" rel="noopener noreferrer" style={{ color: "var(--text-muted)", display: "flex", alignItems: "center" }}>
+                  <ExternalLink size={12} />
+                </a>
+              </div>
+            </div>
+            <div>
+              <span style={lx}>Destination</span>
+              <div style={{ height: 32, border: "1px solid var(--border)", background: "var(--sky-100)", padding: "0 8px", display: "flex", alignItems: "center", overflow: "hidden" }}>
+                <span style={{ fontSize: 12, color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{created.destination}</span>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: 8, paddingTop: 4, borderTop: "1px solid var(--border)" }}>
+            <button
+              type="button"
+              onClick={resetForm}
+              style={{ flex: 1, height: 32, border: "1px solid var(--ocean-300)", background: "transparent", color: "var(--ocean-600)", fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "var(--font-body)" }}
+            >
+              Create another
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              style={{ flex: 1, height: 32, border: "none", background: "var(--ocean-500)", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "var(--font-body)" }}
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      </Modal>
+    );
+  }
+
+  /* ── Create form ── */
   return (
-    <Modal open={true} onClose={onClose} title="Create link" width={640}>
+    <Modal open={true} onClose={onClose} title="Create link" width={580}>
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          const normalizedSlug = slug.trim().length > 0 ? slug.trim() : `link-${Date.now()}`;
-          const shortUrl = `${domain}/${normalizedSlug}`;
-          const newLink: LinkRecord = {
-            id: `link-${Date.now()}`,
-            shortUrl,
-            destination,
-            slug: normalizedSlug,
-            domain,
-            createdAt: new Date().toISOString(),
-            createdBy: "user-1",
-            workspaceId: "ws-1",
-            campaignAssigned: assignCampaign,
-            tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean),
-            utm: {
-              ...(utmSource ? { source: utmSource } : {}),
-              ...(utmMedium ? { medium: utmMedium } : {}),
-            },
-            trackingPixels: Array.from(selectedPixels),
-            geoRuleEnabled: geoEnabled,
-            geoCountry: geoEnabled ? geoCountry : undefined,
-            geoRedirectUrl: geoEnabled ? geoRedirect : undefined,
-            expiresAt: expiryDays ? new Date(Date.now() + Number(expiryDays) * 24 * 60 * 60 * 1000).toISOString() : undefined,
-            qrCodeUrl: enableQr ? `https://${domain}/qr/${normalizedSlug}` : undefined,
-            stats: {
-              clicks: 0,
-              ctr: 0,
-              timeline: [],
-              referrers: {},
-              devices: {},
-              geo: {},
-              campaigns: { [assignCampaign ? campaign : "Unassigned"]: 0 },
-            },
-          };
-          onCreate(newLink);
+          const dest = destination.trim();
+          if (!dest || dest === "https://") { setError("Destination URL is required."); return; }
+          setError(null);
+          setSubmitting(true);
+          const expiryMinutes = expiryDays ? Math.max(1, Number(expiryDays)) * 24 * 60 : 43200;
+          const parsedTags = tags.split(",").map((t) => t.trim()).filter(Boolean);
+          api
+            .post<{ shortCode: string; shortUrl: string }>("/api/v1/short-links", {
+              finalUrl: dest, expiryMinutes, oneTimeUse,
+            })
+            .then((res) => {
+              const shortCode = res.shortCode;
+              const redirectUrl = res.shortUrl || `${API_BASE}/r/${shortCode}`;
+              const displayUrl = `${SHORT_DOMAIN}/${shortCode}`;
+              // Fire-and-forget: set title + tags via update
+              if (title.trim() || parsedTags.length > 0) {
+                api.put(`/api/admin/v1/links/${shortCode}`, {
+                  title: title.trim() || undefined,
+                  tags: parsedTags.length > 0 ? parsedTags : undefined,
+                }).catch(console.error);
+              }
+              const newLink: LinkRecord = {
+                id: shortCode,
+                shortUrl: displayUrl,
+                redirectUrl,
+                destination: dest,
+                slug: shortCode,
+                domain: SHORT_DOMAIN,
+                createdAt: new Date().toISOString(),
+                createdBy: "",
+                workspaceId: "",
+                tags: parsedTags,
+                title: title.trim() || undefined,
+                expiresAt: new Date(Date.now() + expiryMinutes * 60 * 1000).toISOString(),
+                stats: { clicks: 0, ctr: 0, timeline: [], referrers: {}, devices: {}, geo: {}, campaigns: {} },
+              };
+              onCreate(newLink);
+              setCreated({ shortUrl: displayUrl, redirectUrl, destination: dest });
+            })
+            .catch((err: Error) => setError(err.message))
+            .finally(() => setSubmitting(false));
         }}
-        style={{ display: "grid", gap: 10 }}
+        style={{ display: "grid", gap: 12 }}
       >
-        <label style={{ display: "grid", gap: 3 }}>
-          <span style={labelStyle}>Destination URL *</span>
-          <input value={destination} onChange={(event) => setDestination(event.target.value)} style={inputStyle} required />
-        </label>
-
-        <div style={{ display: "grid", gap: 3 }}>
-          <span style={labelStyle}>Domain</span>
-          <div style={{ display: "flex", gap: 4 }}>
-            <select value={domain} onChange={(event) => setDomain(event.target.value)} style={{ ...inputStyle, width: 130 }}>
-              {DOMAINS.map((d) => (
-                <option key={d} value={d}>{d}</option>
-              ))}
-            </select>
-            <input value={slug} onChange={(event) => setSlug(event.target.value)} placeholder="slug" style={{ ...inputStyle, flex: 1 }} />
+        {error && (
+          <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", color: "#B91C1C", padding: "8px 12px", fontSize: 12, fontWeight: 600 }}>
+            {error}
           </div>
-        </div>
+        )}
 
         <label style={{ display: "grid", gap: 3 }}>
-          <span style={labelStyle}>Tags</span>
-          <input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="tag1, tag2, tag3" style={inputStyle} />
+          <span style={lx}>Destination URL <span style={{ color: "#B91C1C" }}>*</span></span>
+          <input
+            value={destination}
+            onChange={(e) => setDestination(e.target.value)}
+            onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = "var(--ocean-500)"; }}
+            onBlur={(e) => { (e.target as HTMLInputElement).style.borderColor = "var(--border)"; }}
+            style={sx}
+            required
+            placeholder="https://your-destination.com/page"
+            autoFocus
+          />
         </label>
 
-        <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8 }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-            <span style={labelStyle}>Campaign</span>
-            <button
-              type="button"
-              onClick={() => setAssignCampaign(!assignCampaign)}
-              style={{
-                width: 38,
-                height: 20,
-                background: assignCampaign ? "var(--ocean-500)" : "#E5E7EB",
-                border: `1px solid ${assignCampaign ? "var(--ocean-600)" : "#D1D5DB"}`,
-                borderRadius: 2,
-                cursor: "pointer",
-                position: "relative",
-                transition: "all 0.2s ease",
-                display: "flex",
-                alignItems: "center",
-              }}
-            >
-              <div
-                style={{
-                  position: "absolute",
-                  width: 16,
-                  height: 16,
-                  background: "white",
-                  borderRadius: 0,
-                  border: `1px solid ${assignCampaign ? "var(--ocean-600)" : "#D1D5DB"}`,
-                  left: assignCampaign ? 18 : 1,
-                  transition: "left 0.2s ease",
-                }}
-              />
-            </button>
-          </div>
+        <label style={{ display: "grid", gap: 3 }}>
+          <span style={lx}>Title <span style={{ color: "var(--text-muted)", fontWeight: 400, textTransform: "none" }}>(optional)</span></span>
+          <input
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = "var(--ocean-500)"; }}
+            onBlur={(e) => { (e.target as HTMLInputElement).style.borderColor = "var(--border)"; }}
+            style={sx}
+            placeholder="e.g. Summer sale landing page"
+          />
+        </label>
 
-          {assignCampaign && (
-            <div>
-              <select value={campaign} onChange={(event) => setCampaign(event.target.value)} style={inputStyle}>
-                {CAMPAIGNS.map((c) => (
-                  <option key={c.value} value={c.value}>{c.label}</option>
-                ))}
-              </select>
-            </div>
-          )}
-        </div>
+        <label style={{ display: "grid", gap: 3 }}>
+          <span style={lx}>Tags <span style={{ color: "var(--text-muted)", fontWeight: 400, textTransform: "none" }}>(comma separated)</span></span>
+          <input
+            value={tags}
+            onChange={(e) => setTags(e.target.value)}
+            onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = "var(--ocean-500)"; }}
+            onBlur={(e) => { (e.target as HTMLInputElement).style.borderColor = "var(--border)"; }}
+            style={sx}
+            placeholder="campaign, product, launch"
+          />
+        </label>
 
-        <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8 }}>
-          <span style={labelStyle}>UTM Parameters</span>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
-            <select value={utmSource} onChange={(event) => setUtmSource(event.target.value)} style={inputStyle}>
-              {UTM_SOURCES.map((s) => (
-                <option key={s.value} value={s.value}>{s.label}</option>
-              ))}
-            </select>
-            <select value={utmMedium} onChange={(event) => setUtmMedium(event.target.value)} style={inputStyle}>
-              {UTM_MEDIUMS.map((m) => (
-                <option key={m.value} value={m.value}>{m.label}</option>
-              ))}
-            </select>
-          </div>
-        </div>
-
-        <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8 }}>
-          <span style={{ ...labelStyle, marginBottom: 4 }}>Tracking Pixels</span>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
-            {PIXEL_OPTIONS.map((pixel) => {
-              const active = selectedPixels.has(pixel.id);
-              return (
-                <button
-                  key={pixel.id}
-                  type="button"
-                  onClick={() => {
-                    setSelectedPixels((previous) => {
-                      const next = new Set(previous);
-                      if (next.has(pixel.id)) next.delete(pixel.id);
-                      else next.add(pixel.id);
-                      return next;
-                    });
-                  }}
-                  style={{
-                    height: 28,
-                    border: `1px solid ${active ? "var(--ocean-400)" : "var(--border)"}`,
-                    background: active ? "var(--ocean-50)" : "var(--sky-100)",
-                    color: active ? "var(--ocean-700)" : "var(--text-secondary)",
-                    fontSize: 12,
-                    fontWeight: 600,
-                    cursor: "pointer",
-                    textAlign: "left",
-                    padding: "0 8px",
-                  }}
-                >
-                  {pixel.label}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8, display: "grid", gap: 4 }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-            <span style={labelStyle}>Geo redirect rule</span>
-            <button
-              type="button"
-              onClick={() => setGeoEnabled(!geoEnabled)}
-              style={{
-                width: 38,
-                height: 20,
-                background: geoEnabled ? "var(--ocean-500)" : "#E5E7EB",
-                border: `1px solid ${geoEnabled ? "var(--ocean-600)" : "#D1D5DB"}`,
-                borderRadius: 2,
-                cursor: "pointer",
-                position: "relative",
-                transition: "all 0.2s ease",
-                display: "flex",
-                alignItems: "center",
-              }}
-            >
-              <div
-                style={{
-                  position: "absolute",
-                  width: 16,
-                  height: 16,
-                  background: "white",
-                  borderRadius: 0,
-                  border: `1px solid ${geoEnabled ? "var(--ocean-600)" : "#D1D5DB"}`,
-                  left: geoEnabled ? 18 : 1,
-                  transition: "left 0.2s ease",
-                }}
-              />
-            </button>
-          </div>
-
-          {geoEnabled && (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
-              <select value={geoCountry} onChange={(event) => setGeoCountry(event.target.value)} style={inputStyle}>
-                {GEO_COUNTRIES.map((country) => <option key={country} value={country}>{country}</option>)}
-              </select>
-              <input value={geoRedirect} onChange={(event) => setGeoRedirect(event.target.value)} placeholder="Redirect URL" style={inputStyle} />
-            </div>
-          )}
-        </div>
-
-        <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8 }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <span style={labelStyle}>Auto-generate QR code</span>
-            <button
-              type="button"
-              onClick={() => setEnableQr(!enableQr)}
-              style={{
-                width: 38,
-                height: 20,
-                background: enableQr ? "var(--ocean-500)" : "#E5E7EB",
-                border: `1px solid ${enableQr ? "var(--ocean-600)" : "#D1D5DB"}`,
-                borderRadius: 2,
-                cursor: "pointer",
-                position: "relative",
-                transition: "all 0.2s ease",
-                display: "flex",
-                alignItems: "center",
-              }}
-            >
-              <div
-                style={{
-                  position: "absolute",
-                  width: 16,
-                  height: 16,
-                  background: "white",
-                  borderRadius: 0,
-                  border: `1px solid ${enableQr ? "var(--ocean-600)" : "#D1D5DB"}`,
-                  left: enableQr ? 18 : 1,
-                  transition: "left 0.2s ease",
-                }}
-              />
-            </button>
-          </div>
-        </div>
-
-        <div style={{ marginTop: 8 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           <label style={{ display: "grid", gap: 3 }}>
-            <span style={labelStyle}>Expiry (days)</span>
-            <input value={expiryDays} onChange={(event) => setExpiryDays(event.target.value)} type="number" placeholder="30" style={inputStyle} />
+            <span style={lx}>Expiry <span style={{ color: "var(--text-muted)", fontWeight: 400, textTransform: "none" }}>(days)</span></span>
+            <input
+              type="number"
+              min={1}
+              max={365}
+              value={expiryDays}
+              onChange={(e) => setExpiryDays(e.target.value)}
+              onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = "var(--ocean-500)"; }}
+              onBlur={(e) => { (e.target as HTMLInputElement).style.borderColor = "var(--border)"; }}
+              style={sx}
+              placeholder="30"
+            />
           </label>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+            <span style={lx}>One-time use</span>
+            <div style={{ display: "flex", alignItems: "center", height: 32, gap: 10 }}>
+              <button
+                type="button"
+                onClick={() => setOneTimeUse((v) => !v)}
+                style={{
+                  width: 40, height: 22,
+                  background: oneTimeUse ? "var(--ocean-500)" : "#E5E7EB",
+                  border: `1px solid ${oneTimeUse ? "var(--ocean-600)" : "#D1D5DB"}`,
+                  borderRadius: 2, cursor: "pointer", position: "relative",
+                  flexShrink: 0,
+                }}
+              >
+                <div style={{
+                  position: "absolute", width: 16, height: 16, background: "white",
+                  border: `1px solid ${oneTimeUse ? "var(--ocean-400)" : "#D1D5DB"}`,
+                  top: 2, left: oneTimeUse ? 20 : 2, transition: "left 0.15s",
+                }} />
+              </button>
+              <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>Link expires after first click</span>
+            </div>
+          </div>
         </div>
 
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 12, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
-          <button type="button" onClick={onClose} style={{ height: 30, padding: "0 10px", border: "1px solid var(--border)", background: "var(--sky-100)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
+          <button
+            type="button"
+            onClick={onClose}
+            style={{ height: 32, padding: "0 14px", border: "1px solid var(--border)", background: "var(--sky-100)", cursor: "pointer", fontSize: 12, fontWeight: 600, fontFamily: "var(--font-body)" }}
+          >
             Cancel
           </button>
-          <button type="submit" style={{ height: 30, padding: "0 10px", border: "none", background: "var(--ocean-500)", color: "#fff", fontWeight: 700, cursor: "pointer", fontSize: 12 }}>
-            Create link
+          <button
+            type="submit"
+            disabled={submitting}
+            style={{ height: 32, padding: "0 18px", border: "none", background: submitting ? "var(--ocean-300)" : "var(--ocean-500)", color: "#fff", fontWeight: 700, cursor: submitting ? "not-allowed" : "pointer", fontSize: 12, fontFamily: "var(--font-body)" }}
+          >
+            {submitting ? "Creating…" : "Create link"}
           </button>
         </div>
       </form>
@@ -1006,6 +1024,8 @@ function LinkDetailsDrawer({
   const status = getLinkStatus(link);
   const [metaSubTab, setMetaSubTab] = useState<DrawerMetaSubTab>("overview");
   const [isEditing, setIsEditing] = useState(false);
+  const [extendMinutes, setExtendMinutes] = useState(1440);
+  const [extendLoading, setExtendLoading] = useState(false);
   const [form, setForm] = useState({
     destination: link.destination,
     domain: link.domain,
@@ -1061,15 +1081,16 @@ function LinkDetailsDrawer({
 
   const handleSaveEdit = () => {
     const campaignKey = form.campaign.trim() || "Unassigned";
+    const updatedTags = form.tags
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
     const updated: LinkRecord = {
       ...link,
       destination: form.destination.trim() || link.destination,
       domain: form.domain.trim() || link.domain,
       slug: form.slug.trim() || link.slug,
-      tags: form.tags
-        .split(",")
-        .map((item) => item.trim())
-        .filter(Boolean),
+      tags: updatedTags,
       createdAt: form.createdDate ? new Date(form.createdDate).toISOString() : link.createdAt,
       expiresAt: form.expiryDate ? new Date(form.expiryDate).toISOString() : undefined,
       stats: {
@@ -1079,6 +1100,9 @@ function LinkDetailsDrawer({
     };
     onUpdate(updated);
     setIsEditing(false);
+    api
+      .put(`/api/admin/v1/links/${link.id}`, { tags: updatedTags })
+      .catch(console.error);
   };
 
   return (
@@ -1483,6 +1507,41 @@ function LinkDetailsDrawer({
           )}
         </div>
 
+        {status === "active" && (
+          <div style={{ borderTop: "1px solid var(--border)", padding: "10px 16px", display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em", whiteSpace: "nowrap" }}>Extend expiry</span>
+            <select
+              value={extendMinutes}
+              onChange={(e) => setExtendMinutes(Number(e.target.value))}
+              style={{ flex: 1, height: 30, border: "1px solid var(--border)", background: "var(--sky-100)", color: "var(--text-secondary)", fontSize: 12, fontFamily: "var(--font-body)", padding: "0 6px" }}
+            >
+              <option value={60}>+ 1 hour</option>
+              <option value={360}>+ 6 hours</option>
+              <option value={1440}>+ 1 day</option>
+              <option value={10080}>+ 7 days</option>
+              <option value={43200}>+ 30 days</option>
+            </select>
+            <button
+              disabled={extendLoading}
+              onClick={() => {
+                setExtendLoading(true);
+                api
+                  .post<{ shortCode: string; newExpiryUtc: string }>(
+                    `/api/admin/v1/links/${link.id}/extend-expiry`,
+                    { minutes: extendMinutes }
+                  )
+                  .then((res) => {
+                    onUpdate({ ...link, expiresAt: res.newExpiryUtc });
+                  })
+                  .catch(console.error)
+                  .finally(() => setExtendLoading(false));
+              }}
+              style={{ height: 30, border: "none", background: "var(--ocean-500)", color: "#fff", padding: "0 12px", fontSize: 11, fontWeight: 700, cursor: extendLoading ? "not-allowed" : "pointer", opacity: extendLoading ? 0.6 : 1, whiteSpace: "nowrap" }}
+            >
+              {extendLoading ? "…" : "Extend"}
+            </button>
+          </div>
+        )}
         <div style={{ borderTop: "1px solid var(--border)", padding: "12px 16px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
           <Link href={`/dashboard/links/${link.id}`} style={{ height: 34, display: "inline-flex", alignItems: "center", justifyContent: "center", border: "1px solid var(--border)", color: "var(--text-secondary)", fontSize: 12, fontWeight: 700, textDecoration: "none", background: "var(--sky-100)" }}>
             Open full details

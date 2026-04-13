@@ -12,6 +12,7 @@ import {
 import PageHeader from "@/platform/components/PageHeader";
 import Panel from "@/platform/components/Panel";
 import Modal from "@/platform/components/Modal";
+import { api } from "@/platform/lib/api";
 
 /* ─── Tabs ───────────────────────────────────────────────────────────────── */
 const TABS = [
@@ -67,6 +68,81 @@ const PERM_COLORS: Record<string, { bg: string; color: string; border: string }>
   write:  { bg: "var(--ocean-50)",color: "var(--ocean-700)",  border: "var(--ocean-200)" },
   delete: { bg: "#FFF1F2",        color: "#9F1239",           border: "#FECDD3" },
 };
+
+/* ─── Backend DTO types ──────────────────────────────────────────────────── */
+interface ApiKeyDto {
+  keyId: string;
+  name?: string | null;
+  keyPrefix?: string | null;
+  createdAtUtc?: string | null;
+  lastUsedAtUtc?: string | null;
+  permissions?: string[] | null;
+  isRevoked?: boolean;
+  requestCount?: number;
+}
+interface ApiKeyCreateResponse {
+  keyId: string;
+  apiKey: string;
+  name?: string | null;
+  permissions?: string[] | null;
+  createdAtUtc?: string | null;
+}
+interface ApiKeyRecord {
+  id: string;
+  name: string;
+  key: string;
+  created: string;
+  lastUsed: string;
+  permissions: string[];
+  status: "active" | "revoked";
+  requests: number;
+}
+
+interface WebhookDto {
+  id: string;
+  url: string;
+  events?: string[] | null;
+  isActive?: boolean;
+  secret?: string | null;
+}
+interface HookRecord {
+  id: string;
+  name: string;
+  url: string;
+  events: string[];
+  status: "active" | "failing";
+  secret: string;
+  lastDelivery: string;
+  successRate: number;
+  deliveries: number;
+}
+
+function mapApiKey(dto: ApiKeyDto): ApiKeyRecord {
+  return {
+    id: dto.keyId,
+    name: dto.name ?? "API Key",
+    key: dto.keyPrefix ? `${dto.keyPrefix}${"*".repeat(24)}` : "****",
+    created: dto.createdAtUtc?.slice(0, 10) ?? "—",
+    lastUsed: dto.lastUsedAtUtc ? new Date(dto.lastUsedAtUtc).toLocaleDateString() : "Never",
+    permissions: dto.permissions ?? ["read"],
+    status: dto.isRevoked ? "revoked" : "active",
+    requests: dto.requestCount ?? 0,
+  };
+}
+
+function mapWebhook(dto: WebhookDto): HookRecord {
+  return {
+    id: dto.id,
+    name: dto.url,
+    url: dto.url,
+    events: dto.events ?? [],
+    status: "active" as const,
+    secret: dto.secret ?? "—",
+    lastDelivery: "—",
+    successRate: 100,
+    deliveries: 0,
+  };
+}
 
 /* ─── Webhooks data ──────────────────────────────────────────────────────── */
 const EVENT_TYPES = [
@@ -173,8 +249,24 @@ export default function SettingsPage() {
     }
   }, []);
 
+  /* Load API Keys from backend */
+  useEffect(() => {
+    api
+      .get<{ total: number; items: ApiKeyDto[] }>("/api/admin/v1/tenant/api-keys?pageSize=100")
+      .then((res) => setApiKeys(res.items.map(mapApiKey)))
+      .catch(console.error);
+  }, []);
+
+  /* Load Webhooks from backend */
+  useEffect(() => {
+    api
+      .get<HookRecord[]>("/api/v1/tenant/webhooks")
+      .then((res) => setHooks(res.map((dto) => mapWebhook(dto as unknown as WebhookDto))))
+      .catch(console.error);
+  }, []);
+
   /* API Keys state */
-  const [apiKeys, setApiKeys]           = useState(INITIAL_KEYS);
+  const [apiKeys, setApiKeys]           = useState<ApiKeyRecord[]>(INITIAL_KEYS);
   const [showKeyModal, setShowKeyModal] = useState(false);
   const [showKey, setShowKey]           = useState<string | null>(null);
   const [copied, setCopied]             = useState<string | null>(null);
@@ -184,7 +276,7 @@ export default function SettingsPage() {
   const [createdKey, setCreatedKey]     = useState<string | null>(null);
 
   /* Webhooks state */
-  const [hooks, setHooks]                 = useState(INITIAL_HOOKS);
+  const [hooks, setHooks]                 = useState<HookRecord[]>(INITIAL_HOOKS);
   const [showHookModal, setShowHookModal] = useState(false);
   const [hookForm, setHookForm]           = useState({ name:"", url:"", events:[] as string[] });
   const [deleteHookId, setDeleteHookId]   = useState<string | null>(null);
@@ -216,21 +308,46 @@ export default function SettingsPage() {
 
   const handleCreateKey = () => {
     if (!newKeyName.trim()) return;
-    const k = `urlify_live_sk_${Math.random().toString(36).slice(2,34)}`;
-    setApiKeys((prev) => [{ id:`k${Date.now()}`, name:newKeyName.trim(), key:k, created:new Date().toISOString().slice(0,10), lastUsed:"Never", permissions:newPerms, status:"active" as const, requests:0 }, ...prev]);
-    setCreatedKey(k); setNewKeyName(""); setNewPerms(["read"]); setShowKeyModal(false);
+    api
+      .post<ApiKeyCreateResponse>("/api/admin/v1/tenant/api-keys", { name: newKeyName.trim(), permissions: newPerms })
+      .then((res) => {
+        const newRecord: ApiKeyRecord = {
+          id: res.keyId,
+          name: res.name ?? newKeyName.trim(),
+          key: res.apiKey,
+          created: res.createdAtUtc?.slice(0, 10) ?? new Date().toISOString().slice(0, 10),
+          lastUsed: "Never",
+          permissions: res.permissions ?? newPerms,
+          status: "active" as const,
+          requests: 0,
+        };
+        setApiKeys((prev) => [newRecord, ...prev]);
+        setCreatedKey(res.apiKey);
+        setNewKeyName(""); setNewPerms(["read"]); setShowKeyModal(false);
+      })
+      .catch((err: Error) => alert(`Failed to create key: ${err.message}`));
   };
   const handleRevokeKey = (id: string) => {
     setApiKeys((prev) => prev.map((k) => k.id === id ? { ...k, status:"revoked" as const, requests:0 } : k));
     setRevokeKeyId(null);
+    api.post(`/api/admin/v1/tenant/api-keys/${id}/revoke`, {}).catch(console.error);
   };
 
   const handleCreateHook = () => {
-    if (!hookForm.name.trim() || !hookForm.url.trim() || hookForm.events.length === 0) return;
-    setHooks((prev) => [{ id:`wh${Date.now()}`, name:hookForm.name.trim(), url:hookForm.url.trim(), events:hookForm.events, status:"active" as const, secret:`whsec_${Math.random().toString(36).slice(2,14)}`, lastDelivery:"Never", successRate:100, deliveries:0 }, ...prev]);
-    setHookForm({ name:"", url:"", events:[] }); setShowHookModal(false);
+    if (!hookForm.url.trim() || hookForm.events.length === 0) return;
+    api
+      .post<WebhookDto>("/api/v1/tenant/webhooks", { url: hookForm.url.trim(), events: hookForm.events })
+      .then((res) => {
+        setHooks((prev) => [mapWebhook(res), ...prev]);
+        setHookForm({ name:"", url:"", events:[] }); setShowHookModal(false);
+      })
+      .catch((err: Error) => alert(`Failed to create webhook: ${err.message}`));
   };
-  const handleDeleteHook  = (id: string) => { setHooks((prev) => prev.filter((h) => h.id !== id)); setDeleteHookId(null); };
+  const handleDeleteHook = (id: string) => {
+    setHooks((prev) => prev.filter((h) => h.id !== id));
+    setDeleteHookId(null);
+    api.delete(`/api/v1/tenant/webhooks/${id}`).catch(console.error);
+  };
   const handleTestHook    = (id: string) => {
     setTestingId(id);
     setTimeout(() => { setTestingId(null); setTestedId(id); setTimeout(() => setTestedId(null), 3000); }, 1200);
